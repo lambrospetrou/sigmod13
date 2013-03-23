@@ -4,17 +4,13 @@
 #include <errno.h>
 #include <stdio.h>
 
+#include <list>
 #include <vector>
-std::vector<char*> results;
-
 
 void err_mem(char* msg){
    perror(msg);
    exit(1);
 }
-
-#include <list>
-#include <vector>
 
 typedef struct _ResultTrieSearch ResultTrieSearch;
 struct _ResultTrieSearch{
@@ -25,13 +21,12 @@ struct _ResultTrieSearch{
 #define VALID_CHARS 26
 typedef struct _TrieNode TrieNode;
 struct _TrieNode{
-   //char distance;
    char *word;
    TrieNode** children;
    std::list<unsigned int> *qids;
 };
 
-TrieNode* TrieNodeHamming_Constructor(){
+TrieNode* TrieNodeHamming_Constructor(char cost){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
    if( !n ) err_mem("error allocating TrieNode");
    memset( n, 0, sizeof(TrieNode) );
@@ -41,7 +36,7 @@ TrieNode* TrieNodeHamming_Constructor(){
    return n;
 }
 
-void TrieHammingInsert( TrieNode* node, char* word, unsigned int qid, char distance ){
+void TrieHammingInsert( TrieNode* node, char* word, unsigned int qid ){
    char* ptr=word;
    int pos;
    while( *ptr ){
@@ -80,29 +75,28 @@ void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, char* word, in
    }
 
    if( currentRow[word_sz] <= maxCost && node->word!=0 ){
-      // ADD THE node->qids[] INTO THE RESULTS
-      //
+       // ADD THE node->qids[] INTO THE RESULTS
 	   for( std::list<unsigned int>::iterator it=node->qids->begin() ; it != node->qids->end(); it++ ){
 	       results->qids->push_back(*it);
 	   }
    }
 
    // if there are more changes available recurse
-   for( i=0; i<=word_sz; i++ )
+   for( i=0; i<=word_sz; i++ ){
       if( currentRow[i] <= maxCost ){
-	 for( j=0; j<VALID_CHARS; j++ ){
-            if( node->children[j] != 0 ){
-               TrieHammingSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
-	    }
-	 }
-         break;
-      }
+	      for( j=0; j<VALID_CHARS; j++ ){
+             if( node->children[j] != 0 ){
+                TrieHammingSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
+	         }
+          }
+	      break; // break because we only need one occurence of cost less than maxCost
+       }
+   }
 }
 
 
 ResultTrieSearch* TrieHammingSearchWord( TrieNode* root, char* word, char maxCost ){
    // declare results
-   //
    char*p;
    int sz;
    for( sz=0,p=word; *p; sz++, p++ );
@@ -149,7 +143,7 @@ int main(int argc, char** argv){
 	   unsigned int qid=1;
 	   char word[128];
 	   while( fscanf( stdin , "%s", word) > 0 ){
-	      TrieHammingInsert( root, word, qid++, 3 );
+	      TrieHammingInsert( root, word, qid++ );
 	   }
 
 	   std::list<unsigned int> res;
