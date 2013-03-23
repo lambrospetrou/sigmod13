@@ -18,8 +18,9 @@ void ListInt_Destructor(ListInt* l){
 		t=l->next;
 		free(l);
 	}
-	free(l);
 }
+
+ListInt* insertBack( ListInt** l )
 
 ListInt* insertSorted(ListInt** l, unsigned int val){
 	if( !l || !*l ){
