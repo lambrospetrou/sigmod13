@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <vector>
+#include <list>
 using namespace std;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -46,9 +47,44 @@ void err_mem(char* msg){
  *  TRIE STRUCTURE END
  ********************************************************************************************/
 
+/********************************************************************************************
+ *  QUERY SET STRUCTURE
+ *************************************/
+
+typedef struct _QuerySetNode QuerySetNode;
+struct _QuerySetNode{
+	char type;
+	//char cost;
+	void **words;
+	char words_num;
+};
+typedef std::vector<QuerySetNode*> QuerySet;
+
+/*
+typedef struct _QuerySet QuerySet;
+struct _QuerySet{
+	std::vector<QuerySetNode*> query;
+};
+*/
+
+/********************************************************************************************
+ *  QUERY SET STRUCTURE END
+ ********************************************************************************************/
+
+/********************************************************************************************
+ *  DOCUMENT RESULT STRUCTURE
+ *************************************/
+struct DocResultsNode{
+	unsigned int docid;
+	unsigned int *qids;
+	unsigned int sz;
+};
+typedef std::list<DocResultsNode> DocResults;
 
 
-
+/********************************************************************************************
+ *  DOCUMENT RESULT STRUCTURE END
+ ********************************************************************************************/
 
 /********************************************************************************************
  *  TRIE STRUCTURE
@@ -99,7 +135,7 @@ void TrieInsert( TrieNode* node, char* word, unsigned int qid ){
 }
 
 ////////////////////////////////////////////////
-// above are the same
+// above are the same regardless of query type
 ////////////////////////////////////////////////
 
 ResultTrieSearch* TrieExactSearchWord( TrieNode* root, char* word ){
