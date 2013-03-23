@@ -26,7 +26,7 @@ struct _TrieNode{
    std::list<unsigned int> *qids;
 };
 
-TrieNode* TrieNodeHamming_Constructor(char cost){
+TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
    if( !n ) err_mem("error allocating TrieNode");
    memset( n, 0, sizeof(TrieNode) );
@@ -36,13 +36,13 @@ TrieNode* TrieNodeHamming_Constructor(char cost){
    return n;
 }
 
-void TrieHammingInsert( TrieNode* node, char* word, unsigned int qid ){
+void TrieInsert( TrieNode* node, char* word, unsigned int qid ){
    char* ptr=word;
    int pos;
    while( *ptr ){
       pos = *ptr - 'a';
       if( node->children[pos] == 0 ){
-         node->children[pos] = TrieNodeHamming_Constructor();
+         node->children[pos] = TrieNode_Constructor();
       }
       node = node->children[pos];
       ptr++;
@@ -55,7 +55,9 @@ void TrieHammingInsert( TrieNode* node, char* word, unsigned int qid ){
    node->qids->push_back(qid);
 }
 
-
+////////////////////////////////////////////////
+// above are the same
+////////////////////////////////////////////////
 
 void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
    char* currentRow = (char*)malloc(word_sz+1);
@@ -94,8 +96,51 @@ void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, char* word, in
    }
 }
 
+void TrieEditSearchWord_Recursive(TrieNode* node, char letter, char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
+   char* currentRow = (char*)malloc(word_sz+1);
+   if( !currentRow ){
+      err_mem( "error allocating current row" );
+   }
 
-ResultTrieSearch* TrieHammingSearchWord( TrieNode* root, char* word, char maxCost ){
+   currentRow[0] = previousRow[0] + 1;
+
+   char i, insertCost, deleteCost, replaceCost, j;
+      for( i=1; i<=word_sz; i++ ){
+         insertCost = currentRow[i-1] + 1;
+         deleteCost = previousRow[i] + 1;
+
+         if( word[i-1] != letter ){
+            replaceCost = previousRow[i-1] + 1;
+         }else{
+            replaceCost = previousRow[i-1];
+         }
+         // find the minimum for this column
+         insertCost = insertCost < replaceCost ? insertCost : replaceCost;
+         currentRow[i] = insertCost < deleteCost ? insertCost : deleteCost;
+      }
+
+   if( currentRow[word_sz] <= maxCost && node->word!=0 ){
+       // ADD THE node->qids[] INTO THE RESULTS
+	   for( std::list<unsigned int>::iterator it=node->qids->begin() ; it != node->qids->end(); it++ ){
+	       results->qids->push_back(*it);
+	   }
+   }
+
+   // if there are more changes available recurse
+   for( i=0; i<=word_sz; i++ ){
+      if( currentRow[i] <= maxCost ){
+	      for( j=0; j<VALID_CHARS; j++ ){
+             if( node->children[j] != 0 ){
+                TrieHammingSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
+	         }
+          }
+	      break; // break because we only need one occurence of cost less than maxCost
+       }
+   }
+}
+
+
+ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, char* word, char maxCost, char hammingORedit ){
    // declare results
    char*p;
    int sz;
@@ -114,7 +159,8 @@ ResultTrieSearch* TrieHammingSearchWord( TrieNode* root, char* word, char maxCos
    // for each children branch of the trie search the word
    for( i=0; i<VALID_CHARS; ++i ){
       if( root->children[i] != 0 ){
-         TrieHammingSearchWord_Recursive(
+    	  if( hammingORedit == 1 )
+    		  TrieHammingSearchWord_Recursive(
         		   root->children[i],
 	               i +'a',
 				   word,
@@ -122,6 +168,15 @@ ResultTrieSearch* TrieHammingSearchWord( TrieNode* root, char* word, char maxCos
 				   currentRow,
 				   results,
 				   maxCost);
+    	  else if( hammingORedit == 2 )
+    		  TrieEditSearchWord_Recursive(
+    		       root->children[i],
+    		  	   i +'a',
+    		  	   word,
+    		  	   sz,
+    		  	   currentRow,
+    		  	   results,
+    		  	   maxCost);
       }
    }
    return results;
@@ -139,18 +194,18 @@ int main(int argc, char** argv){
 	 unsigned long long start = getTime();
 
 	   // create the index
-	   TrieNode *root = TrieNodeHamming_Constructor();
+	   TrieNode *root = TrieNode_Constructor();
 	   unsigned int qid=1;
 	   char word[128];
 	   while( fscanf( stdin , "%s", word) > 0 ){
-	      TrieHammingInsert( root, word, qid++ );
+	      TrieInsert( root, word, qid++ );
 	   }
 
 	   std::list<unsigned int> res;
 
 	   // for each argument keyword search the index
 	   for( argc-- ; argc>0; argc-- ){
-		   ResultTrieSearch* rts = TrieHammingSearchWord( root, argv[argc], 3 );
+		   ResultTrieSearch* rts = TrieEditHammingSearchWord( root, argv[argc], 3, 2 );
 	       for( std::list<unsigned int>::iterator it=rts->qids->begin() ; it != rts->qids->end(); it++ ){
 	    	   res.push_back(*it);
 	       }

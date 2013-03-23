@@ -26,7 +26,7 @@ struct _TrieNode{
    std::list<unsigned int> *qids;
 };
 
-TrieNode* TrieNodeExact_Constructor(){
+TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
    if( !n ) err_mem("error allocating TrieNode");
    memset( n, 0, sizeof(TrieNode) );
@@ -36,13 +36,13 @@ TrieNode* TrieNodeExact_Constructor(){
    return n;
 }
 
-void TrieExactInsert( TrieNode* node, char* word, unsigned int qid ){
+void TrieInsert( TrieNode* node, char* word, unsigned int qid ){
    char* ptr=word;
    int pos;
    while( *ptr ){
       pos = *ptr - 'a';
       if( node->children[pos] == 0 ){
-         node->children[pos] = TrieNodeExact_Constructor();
+         node->children[pos] = TrieNode_Constructor();
       }
       node = node->children[pos];
       ptr++;
@@ -50,15 +50,18 @@ void TrieExactInsert( TrieNode* node, char* word, unsigned int qid ){
    if( !node->word )
        node->word = strdup(word);
    if( !node->qids ){
-       //node->qids = (std::list<unsigned int>*)malloc(sizeof(std::list<unsigned int>));
        node->qids = new std::list<unsigned int>();
    }
    node->qids->push_back(qid);
 }
 
+////////////////////////////////////////////////
+// above are the same
+////////////////////////////////////////////////
+
 ResultTrieSearch* TrieExactSearchWord( TrieNode* root, char* word ){
    // declare results
-   ResultTrieSearch results = (ResultTrieSearch*)malloc(sizeof(ResultTrieSearch));
+   ResultTrieSearch *results = (ResultTrieSearch*)malloc(sizeof(ResultTrieSearch));
    //results.size=0;
    // initialize vector of ints
    char*p, i, found=1;
@@ -74,7 +77,7 @@ ResultTrieSearch* TrieExactSearchWord( TrieNode* root, char* word ){
    if( found && root->word ){
        // WE HAVE A MATCH SO get the List of the query ids and add them to the result
 	   //results.size = root->qids->size();
-	   results.qids = root->qids;
+	   results->qids = root->qids;
    }
    return results;
 }
@@ -91,12 +94,12 @@ int main(int argc, char** argv){
    unsigned long long start = getTime();
 
    // create the index
-   TrieNode *root = TrieNodeExact_Constructor();
+   TrieNode *root = TrieNode_Constructor();
    //FILE* dict = fopen("/usr/share/dict/words", "r");
    unsigned int qid=1;
    char word[128];
    while( fscanf( stdin , "%s", word) > 0 ){
-      TrieExactInsert( root, word, qid++ );
+      TrieInsert( root, word, qid++ );
    }
 
    std::list<unsigned int> res;
