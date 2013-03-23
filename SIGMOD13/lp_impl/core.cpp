@@ -73,17 +73,19 @@ struct _TrieNode{
 
 TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
-   //if( !n ) err_mem("error allocating TrieNode");
-   memset( n, 0, sizeof(TrieNode) );
+   if( !n ) err_mem("error allocating TrieNode");
+   n->qids = 0;
    n->children = (TrieNode**)malloc(VALID_CHARS*sizeof(TrieNode*));
-   //if( !n->children ) err_mem("error allocating children()");
-   memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
+   if( !n->children ) err_mem("error allocating children()");
+   //memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
+   for( int i=0; i<26; i++ )
+	   n->children[i] = (TrieNode*)0;
    return n;
 }
 
 void TrieNode_Destructor( TrieNode* node ){
     for( char i=0; i<VALID_CHARS; i++ ){
-    	if( node->children[i] != 0 ){
+    	if( node->children[i] != (TrieNode*)0 ){
             TrieNode_Destructor( node->children[i] );
     	}
     }
@@ -123,7 +125,7 @@ ResultTrieSearch* TrieExactSearchWord( TrieNode* root, ResultTrieSearch *results
    char p, i, found=1;
    for( p=0; p<word_sz; p++ ){
 	   i = word[p] -'a';
-	   if( root->children[i] ){
+	   if( root->children[i] != 0 ){
            root = root->children[i];
 	   }else{
 		   found=0;
@@ -165,17 +167,21 @@ void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, const char* wo
 	   }
    }
 
+
+
    // if there are more changes available recurse
    for( i=0; i<=word_sz; i++ ){
       if( currentRow[i] <= maxCost ){
 	      for( j=0; j<VALID_CHARS; j++ ){
-             if( node->children[j] != 0 ){
-                TrieHammingSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
+             if( node->children[j] != (TrieNode*)0 ){
+                TrieHammingSearchWord_Recursive( (TrieNode*)node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
 	         }
           }
 	      break; // break because we only need one occurence of cost less than maxCost
        }
    }
+
+   free(currentRow);
 }
 
 void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
@@ -212,13 +218,14 @@ void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word,
    for( i=0; i<=word_sz; i++ ){
       if( currentRow[i] <= maxCost ){
 	      for( j=0; j<VALID_CHARS; j++ ){
-             if( node->children[j] != 0 ){
-                TrieHammingSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
+             if( node->children[j] != (TrieNode*)0 ){
+                TrieHammingSearchWord_Recursive((TrieNode*)node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
 	         }
           }
 	      break; // break because we only need one occurence of cost less than maxCost
        }
    }
+   free(currentRow);
 }
 
 ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *results, const char* word, char sz, char maxCost, char hammingORedit ){
@@ -238,10 +245,10 @@ ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *r
    }
    // for each children branch of the trie search the word
    for( i=0; i<VALID_CHARS; ++i ){
-      if( root->children[i] != 0 ){
+      if( root->children[i] != (TrieNode*)0 ){
     	  if( hammingORedit == 1 )
     		  TrieHammingSearchWord_Recursive(
-        		   root->children[i],
+    			   (TrieNode*)root->children[i],
 	               i +'a',
 				   word,
 				   sz,
@@ -250,7 +257,7 @@ ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *r
 				   maxCost);
     	  else if( hammingORedit == 2 )
     		  TrieEditSearchWord_Recursive(
-    		       root->children[i],
+    			   (TrieNode*)root->children[i],
     		  	   i +'a',
     		  	   word,
     		  	   sz,
@@ -337,7 +344,7 @@ ErrorCode InitializeIndex(){
     trie_edit[3] = TrieNode_Constructor();
 
     querySet = new QuerySet();
-    querySet->reserve(4096);
+    //querySet->reserve(4096);
     docResults = new DocResults();
 
 	return EC_SUCCESS;
@@ -394,20 +401,22 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 		   t = trie_edit;
 		   break;
 		}// end of match_type
-		switch (match_dist) {
-		case 0:
-			n = TrieInsert(t[0], start, end - start, query_id, qnode->words_num);
-			break;
-		case 1:
-			n = TrieInsert(t[1], start, end - start, query_id, qnode->words_num);
-			break;
-		case 2:
-			n = TrieInsert(t[2], start, end - start, query_id, qnode->words_num);
-			break;
-		case 3:
-			n = TrieInsert(t[3], start, end - start, query_id, qnode->words_num);
-			break;
-		}// end of match_dist
+		if( match_type != MT_EXACT_MATCH ){
+			switch (match_dist) {
+			case 0:
+				n = TrieInsert(t[0], start, end - start, query_id, qnode->words_num);
+				break;
+			case 1:
+				n = TrieInsert(t[1], start, end - start, query_id, qnode->words_num);
+				break;
+			case 2:
+				n = TrieInsert(t[2], start, end - start, query_id, qnode->words_num);
+				break;
+			case 3:
+				n = TrieInsert(t[3], start, end - start, query_id, qnode->words_num);
+				break;
+			}// end of match_dist
+		}
         qnode->words[qnode->words_num] = n;
         qnode->words_num++;
 
