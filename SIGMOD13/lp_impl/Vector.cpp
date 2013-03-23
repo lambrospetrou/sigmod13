@@ -8,11 +8,11 @@ void err_mem(char* msg){
    exit(1);
 }
 
-#define TYPE unsigned int
+#define VEC_TYPE unsigned int
 
 typedef struct _Vector Vector;
 struct _Vector{
-	TYPE *data;
+	VEC_TYPE *data;
 	unsigned long long size;
 	unsigned long long maxSize;
 };
@@ -22,23 +22,23 @@ Vector* Vector_Constructor(){
 	if(v == NULL){ err_mem("error constructing vector"); }
 	v->size = 0;
 	v->maxSize = 128;
-	v->data = (TYPE*)malloc(sizeof(TYPE)*v->maxSize);
+	v->data = (VEC_TYPE*)malloc(sizeof(VEC_TYPE)*v->maxSize);
 	if(v->data == NULL){ err_mem("error allocating vector data"); }
 	return v;
 }
 
-TYPE* Vector_get(Vector* v, unsigned long long i){
+VEC_TYPE* Vector_get(Vector* v, unsigned long long i){
 	if( i<0 || i>=v->size ){return NULL;}
-	return &(v->data[i]);
+	return &v->data[i];
 }
 
-TYPE* Vector_push_back(Vector* v, TYPE val ){
+VEC_TYPE* Vector_push_back(Vector* v, VEC_TYPE val ){
 	if( v->size == v->maxSize ){
 		// reallocate
 		v->maxSize *= 2;
-		TYPE* td = (TYPE*)malloc(v->maxSize * sizeof(TYPE));
+		VEC_TYPE* td = (VEC_TYPE*)malloc(v->maxSize * sizeof(VEC_TYPE));
 		if( !td ) err_mem("error expanding vector size");
-		memcpy( td, v->data, v->size * sizeof(TYPE) );
+		memcpy( td, v->data, v->size * sizeof(VEC_TYPE) );
 		free( v->data );
 		v->data = td;
 	}

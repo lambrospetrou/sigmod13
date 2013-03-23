@@ -9,8 +9,6 @@ std::vector<char*> results;
 
 int matches=0;
 
-
-
 void err_mem(char* msg){
    perror(msg);
    exit(1);
@@ -22,7 +20,6 @@ struct _TrieNode{
    char *word;
    TrieNode** children;
 };
-
 
 TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
@@ -47,7 +44,6 @@ void TrieInsert( TrieNode* node, char* word ){
    }
    node->word = strdup(word);
 }
-
 
 
 void TrieSearchWord_Recursive(TrieNode* node, char letter, char* word, int word_sz, char*previousRow, /* results set, */ int maxCost ){
@@ -109,37 +105,6 @@ void TrieSearchWord( TrieNode* root, char* word, int maxCost ){
    /*for( p=word; *p; p++ ){
       currentRow[*p-'a']=*p-'a';
    }*/
-   char i;
-   for( i=0; i<=sz; i++ ){
-      currentRow[i]=i;
-   }
-   // for each children branch of the trie search the word
-   for( i=0; i<VALID_CHARS; ++i ){
-      if( root->children[i] != 0 ){
-         TrieSearchWord_Recursive(
-        		   root->children[i],
-	               i +'a',
-				   word,
-				   sz,
-				   currentRow,
-				   /* results set, */
-				   maxCost);
-      }
-   }
-   // return results
-}
-
-void TrieSearchWordIterative( TrieNode* root, char* word, int maxCost ){
-   // declare results
-   //
-   char*p;
-   int sz;
-   for( sz=0,p=word; *p; sz++, p++ );
-   char *currentRow = (char*)malloc(sz+1);
-   if( !currentRow ){
-      err_mem( "error allocating current row" );
-   }
-   // create the current row // 0,1,2,3,4,,,sz
    char i;
    for( i=0; i<=sz; i++ ){
       currentRow[i]=i;
