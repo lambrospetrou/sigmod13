@@ -21,7 +21,7 @@ struct _ResultTrieSearch{
 #define VALID_CHARS 26
 typedef struct _TrieNode TrieNode;
 struct _TrieNode{
-   char *word;
+   //char *word;
    TrieNode** children;
    std::list<unsigned int> *qids;
 };
@@ -47,8 +47,8 @@ void TrieInsert( TrieNode* node, char* word, unsigned int qid ){
       node = node->children[pos];
       ptr++;
    }
-   if( !node->word )
-       node->word = strdup(word);
+   //if( !node->word )
+     //  node->word = strdup(word);
    if( !node->qids ){
        node->qids = new std::list<unsigned int>();
    }
@@ -76,7 +76,7 @@ void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, char* word, in
       }
    }
 
-   if( currentRow[word_sz] <= maxCost && node->word!=0 ){
+   if( currentRow[word_sz] <= maxCost && node->qids!=0 ){
        // ADD THE node->qids[] INTO THE RESULTS
 	   for( std::list<unsigned int>::iterator it=node->qids->begin() ; it != node->qids->end(); it++ ){
 	       results->qids->push_back(*it);
@@ -119,7 +119,7 @@ void TrieEditSearchWord_Recursive(TrieNode* node, char letter, char* word, int w
          currentRow[i] = insertCost < deleteCost ? insertCost : deleteCost;
       }
 
-   if( currentRow[word_sz] <= maxCost && node->word!=0 ){
+   if( currentRow[word_sz] <= maxCost && node->qids!=0 ){
        // ADD THE node->qids[] INTO THE RESULTS
 	   for( std::list<unsigned int>::iterator it=node->qids->begin() ; it != node->qids->end(); it++ ){
 	       results->qids->push_back(*it);
