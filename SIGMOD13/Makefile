@@ -49,10 +49,10 @@ LIBRARY=core
 all: $(PROGRAMS)
 
 lib: $(IMPL_O)
-	$(CXX) $(CXXFLAGS) -shared -o lib$(LIBRARY).so $(IMPL_O)
+	$(CXX) $(CXXFLAGS) -shared -o lib$(LIBRARY).so $(IMPL_O) $(LDFLAGS)
 
 testdriver: lib $(TEST_O)
-	$(CXX) $(CXXFLAGS) -o testdriver $(TEST_O) ./lib$(LIBRARY).so
+	$(CXX) $(CXXFLAGS)  -o testdriver $(TEST_O) ./lib$(LIBRARY).so $(LDFLAGS)
 
 clean:
 	rm -f $(PROGRAMS) lib$(LIBRARY).so
