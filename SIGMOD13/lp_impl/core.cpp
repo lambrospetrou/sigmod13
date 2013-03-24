@@ -122,7 +122,6 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, unsigned i
 ////////////////////////////////////////////////
 
 ResultTrieSearch* TrieExactSearchWord( TrieNode* root, ResultTrieSearch *results, const char* word, char word_sz ){
-
    char p, i, found=1;
    for( p=0; p<word_sz; p++ ){
 	   i = word[p] -'a';
@@ -142,32 +141,124 @@ ResultTrieSearch* TrieExactSearchWord( TrieNode* root, ResultTrieSearch *results
    return results;
 }
 
+struct HammingNode{
+	TrieNode* node;
+	char letter;
+	char depth;
+	char tcost;
+};
 
-void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char tcost, char depth, ResultTrieSearch* results, char maxCost ){
+// TODO - BE CAREFULL WITH THE GLOBAL STACK IN PARALLEL CODE
+std::vector<HammingNode> *stack=new std::vector<HammingNode>();
+void TrieHammingSearchWord(TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
+	HammingNode current, n;
+	char j;
 
-   if( word[depth-1] != letter ){
-	   tcost++;
-   }
-
-   if( tcost <=maxCost ){
-	   if( word_sz==depth && node->qids!=0 ){
-		   // ADD THE node->qids[] INTO THE RESULTS
-		   for( QueryArrayList::iterator it=node->qids->begin(), end=node->qids->end() ; it != end; it++ ){
-			   results->qids->push_back(*it);
-		   }
-	   }else if( word_sz > depth ){
-		   // recurse even further
-		   char j;
-		   for( j=0; j<VALID_CHARS; j++ ){
-			   if( node->children[j] != 0 ){
-				   TrieHammingSearchWord_Recursive( node->children[j], 'a'+j, word, word_sz, tcost, depth+1, results, maxCost);
-			   }
-		   }
+	// add the initial nodes
+	for( j=0; j<VALID_CHARS; j++ ){
+	   if( node->children[j] != 0 ){
+		   current.depth = 1;
+		   current.node = node->children[j];
+		   current.letter = 'a' + j;
+		   current.tcost = 0;
+		   stack->push_back(current);
 	   }
-   }
+    }
 
+	while( !stack->empty() ){
+		current = stack->back();
+		stack->pop_back();
+
+		if( current.letter != word[current.depth-1] ){
+			current.tcost++;
+		}
+		if( current.tcost <= maxCost ){
+			if( word_sz == current.depth && current.node->qids!=0 ){
+				// ADD THE node->qids[] INTO THE RESULTS
+				for( QueryArrayList::iterator it=current.node->qids->begin(), end=current.node->qids->end() ; it != end; it++ ){
+				    results->qids->push_back(*it);
+				}
+			}else if( word_sz > current.depth ){
+				for( j=0; j<VALID_CHARS; j++ ){
+					   if( current.node->children[j] != 0 ){
+						   n.depth = current.depth+1;
+						   n.node = current.node->children[j];
+						   n.letter = 'a' + j;
+						   n.tcost = current.tcost;
+						   stack->push_back(n);
+					   }
+				    }
+			}
+		}
+	}
 }
 
+struct EditNode{
+	TrieNode* node;
+	char previous[MAX_WORD_LENGTH+1];
+	char letter;
+};
+std::vector<EditNode> *edit_stack=new std::vector<EditNode>();
+void TrieEditSearchWord_Recursive(TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
+    EditNode c, n;
+    char current[MAX_WORD_LENGTH+1];
+    char i, insertCost, deleteCost, replaceCost, j, k;
+
+	for (i = 0; i < VALID_CHARS; ++i) {
+		if (node->children[i] != 0) {
+			c.letter = 'a' + i;
+			c.node = node->children[i];
+			for( j=0; j<=word_sz; j++ )
+			    c.previous[j] = j;
+			edit_stack->push_back(c);
+		}
+	}
+
+
+	while( !edit_stack->empty() ){
+		c = edit_stack->back();
+		edit_stack->pop_back();
+
+        current[0] = c.previous[0]+1;
+
+        for( i=1; i<=word_sz; i++ ){
+     	   if( word[i-1] == c.letter ){
+     		   current[i] = c.previous[i-1];
+     	   }else{
+     		   insertCost = current[i-1] + 1;
+     		   deleteCost = c.previous[i] + 1;
+     		   replaceCost = c.previous[i-1] + 1;
+     		   // find the minimum for this column
+     		   insertCost = insertCost < replaceCost ? insertCost : replaceCost;
+     		   current[i] = insertCost < deleteCost ? insertCost : deleteCost;
+     	   }
+        }
+        if( current[word_sz] <= maxCost && c.node->qids!=0 ){
+            // ADD THE node->qids[] INTO THE RESULTS
+     	   for( QueryArrayList::iterator it=c.node->qids->begin(), end=c.node->qids->end() ; it != end; it++ ){
+     	       results->qids->push_back(*it);
+     	   }
+        }
+
+        // if there are more changes available recurse
+		for (i = 0; i <= word_sz; i++) {
+			if (current[i] <= maxCost) {
+				for (j = 0; j < VALID_CHARS; j++) {
+					if (c.node->children[j] != 0) {
+						n.letter = 'a' + j;
+						n.node = c.node->children[j];
+						for (k = 0; k <= word_sz; k++)
+							n.previous[k] = current[k];
+						edit_stack->push_back(n);
+					}
+				}
+				break; // break because we only need one occurence of cost less than maxCost
+			}// there is no possible match further
+		}
+	}
+}
+
+/*
 void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
    char* currentRow = (char*)malloc(word_sz+1);
    if( !currentRow ){
@@ -189,18 +280,6 @@ void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word,
 		   insertCost = insertCost < replaceCost ? insertCost : replaceCost;
 		   currentRow[i] = insertCost < deleteCost ? insertCost : deleteCost;
 	   }
-
-	   /*
-
-       if( word[i-1] != letter ){
-          replaceCost = previousRow[i-1] + 1;
-       }else{
-          replaceCost = previousRow[i-1];
-       }
-       // find the minimum for this column
-       insertCost = insertCost < replaceCost ? insertCost : replaceCost;
-       currentRow[i] = insertCost < deleteCost ? insertCost : deleteCost;
-       */
    }
 
    if( currentRow[word_sz] <= maxCost && node->qids!=0 ){
@@ -223,18 +302,14 @@ void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word,
    }
    free(currentRow);
 }
+*/
 
 ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *results, const char* word, char sz, char maxCost, char hammingORedit ){
 	char i;
 
-	if (hammingORedit == 1) {
-		for (i = 0; i < VALID_CHARS; ++i) {
-			if (root->children[i] != 0) {
-				TrieHammingSearchWord_Recursive((TrieNode*) root->children[i],
-						i + 'a', word, sz, 0, 1, results, maxCost);
-			}
-		}
-	} else if (hammingORedit == 2) {
+	TrieEditSearchWord_Recursive( root,	word, sz, results, maxCost);
+	/*
+	if (hammingORedit == 2) {
 		char *currentRow = (char*) malloc(sz + 1);
 		if (!currentRow) {
 			err_mem("error allocating TrieHamming");
@@ -251,7 +326,7 @@ ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *r
 		}
 		free(currentRow);
 	}
-
+*/
 
    return results;
 }
@@ -472,10 +547,10 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
     	sz = end-start;
     	TrieExactSearchWord( (TrieNode*)trie_exact, results, start, sz );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_hamming[0], results, start, sz, 0, 1 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_hamming[1], results, start, sz, 1, 1 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_hamming[2], results, start, sz, 2, 1 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_hamming[3], results, start, sz, 3, 1 );
+    	TrieHammingSearchWord((TrieNode*)trie_hamming[0], start, sz, results, 0 );
+    	TrieHammingSearchWord((TrieNode*)trie_hamming[1], start, sz, results, 1 );
+    	TrieHammingSearchWord((TrieNode*)trie_hamming[2], start, sz, results, 2 );
+    	TrieHammingSearchWord((TrieNode*)trie_hamming[3], start, sz, results, 3 );
     	TrieEditHammingSearchWord( (TrieNode*)trie_edit[0], results, start, sz, 0, 2 );
     	TrieEditHammingSearchWord( (TrieNode*)trie_edit[1], results, start, sz, 1, 2 );
     	TrieEditHammingSearchWord( (TrieNode*)trie_edit[2], results, start, sz, 2, 2 );
