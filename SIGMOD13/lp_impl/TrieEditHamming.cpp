@@ -338,7 +338,7 @@ int main(int argc, char** argv){
 	   	results->qids = new QueryArrayList();
 	   // for each argument keyword search the index
 	   for( argc-- ; argc>0; argc-- ){
-		   ResultTrieSearch* rts = TrieEditHammingSearchWord( root, results, argv[argc], strlen(argv[argc]), 3, 2 );
+		   ResultTrieSearch* rts = TrieEditHammingSearchWord( root, results, argv[argc], strlen(argv[argc]), 3, 1 );
 	   }
 
 	   unsigned long long end = getTime();
