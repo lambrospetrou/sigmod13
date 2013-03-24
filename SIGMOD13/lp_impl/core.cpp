@@ -158,29 +158,30 @@ void TrieHammingSearchWord(std::vector<HammingNode> *hamming_stack, TrieNode* no
 	   }
     }
 
-	while( !hamming_stack->empty() ){
+	while (!hamming_stack->empty()) {
 		current = hamming_stack->back();
 		hamming_stack->pop_back();
 
-		if( current.letter != word[current.depth-1] ){
+		if (current.letter != word[current.depth - 1]) {
 			current.tcost++;
 		}
-		if( current.tcost <= maxCost ){
-			if( word_sz == current.depth && current.node->qids!=0 ){
+		if (current.tcost <= maxCost) {
+			if (word_sz == current.depth && current.node->qids != 0) {
 				// ADD THE node->qids[] INTO THE RESULTS
-				for( QueryArrayList::iterator it=current.node->qids->begin(), end=current.node->qids->end() ; it != end; it++ ){
-				    results->qids->push_back(*it);
+				for (QueryArrayList::iterator it = current.node->qids->begin(),
+						end = current.node->qids->end(); it != end; it++) {
+					results->qids->push_back(*it);
 				}
-			}else if( word_sz > current.depth ){
-				for( j=0; j<VALID_CHARS; j++ ){
-					   if( current.node->children[j] != 0 ){
-						   n.depth = current.depth+1;
-						   n.node = current.node->children[j];
-						   n.letter = 'a' + j;
-						   n.tcost = current.tcost;
-						   hamming_stack->push_back(n);
-					   }
-				    }
+			} else if (word_sz > current.depth) {
+				for (j = 0; j < VALID_CHARS; j++) {
+					if (current.node->children[j] != 0) {
+						n.depth = current.depth + 1;
+						n.node = current.node->children[j];
+						n.letter = 'a' + j;
+						n.tcost = current.tcost;
+						hamming_stack->push_back(n);
+					}
+				}
 			}
 		}
 	}
@@ -188,18 +189,27 @@ void TrieHammingSearchWord(std::vector<HammingNode> *hamming_stack, TrieNode* no
 
 struct EditNode{
 	TrieNode* node;
-	char previous[MAX_WORD_LENGTH+1];
+	//char previous[MAX_WORD_LENGTH+1];
+	char *previous;
 	char letter;
 };
+char global_chars_edit[(MAX_WORD_LENGTH+1)*5000000]; // instead of allocating new char tables every iteration just point to the table here
 void TrieEditSearchWord(std::vector<EditNode> *edit_stack, TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
     EditNode c, n;
     char current[MAX_WORD_LENGTH+1];
+
+    char* next = global_chars_edit; // to be used for global_chars
+
     char i, insertCost, deleteCost, replaceCost, j, k;
 
 	for (i = 0; i < VALID_CHARS; ++i) {
 		if (node->children[i] != 0) {
 			c.letter = 'a' + i;
 			c.node = node->children[i];
+
+			c.previous = next; // only for global_chars
+			next += (MAX_WORD_LENGTH+1);
+
 			for( j=0; j<=word_sz; j++ )
 			    c.previous[j] = j;
 			edit_stack->push_back(c);
@@ -239,6 +249,11 @@ void TrieEditSearchWord(std::vector<EditNode> *edit_stack, TrieNode* node, const
 					if (c.node->children[j] != 0) {
 						n.letter = 'a' + j;
 						n.node = c.node->children[j];
+
+						n.previous = next; // only for global_chars
+						next += (MAX_WORD_LENGTH+1);
+
+
 						for (k = 0; k <= word_sz; k++)
 							n.previous[k] = current[k];
 						edit_stack->push_back(n);
@@ -295,9 +310,13 @@ TrieNode *trie_exact;
 TrieNode **trie_hamming;
 TrieNode **trie_edit;
 
+/////////////////////////////////////////////////////////////////////////////////
 // TODO - BE CAREFULL WITH THE GLOBAL STACK IN PARALLEL CODE
 std::vector<HammingNode> *hamming_stack=new std::vector<HammingNode>();
 std::vector<EditNode> *edit_stack=new std::vector<EditNode>();
+// moved above the function in order to be callable
+// char global_chars_edit[(MAX_WORD_LENGTH+1)*5000000]; // instead of allocating new char tables every iteration just point to the table here
+/////////////////////////////////////////////////////////////////////////////////
 
 QuerySet *querySet; // std::vector<QuerySetNode*>
 DocResults *docResults; // std::list<DocResultsNode>
@@ -500,7 +519,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         qn_p.pos = results->qids->begin()->pos;
         counter=1;
 
-		for( QueryArrayList::iterator it=results->qids->begin(), end=results->qids->end(); it != end; it++ ){
+		for( QueryArrayList::iterator it=++results->qids->begin(), end=results->qids->end(); it != end; it++ ){
 			qn_c = *it;
 			if( qn_p.qid == qn_c.qid ){
 				if( qn_p.pos == qn_c.pos ){
