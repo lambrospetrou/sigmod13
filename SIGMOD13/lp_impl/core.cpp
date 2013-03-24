@@ -74,13 +74,9 @@ struct _TrieNode{
 
 TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
-   if( !n ) err_mem("error allocating TrieNode");
+   //if( !n ) err_mem("error allocating TrieNode");
    n->qids = 0;
-   //n->children = (TrieNode**)malloc(VALID_CHARS*sizeof(TrieNode*));
-   //if( !n->children ) err_mem("error allocating children()");
-   //memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
-   for( int i=0; i<26; i++ )
-	   n->children[i] = 0;
+   memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
    return n;
 }
 
@@ -96,9 +92,9 @@ void TrieNode_Destructor( TrieNode* node ){
     free( node );
 }
 
-TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, unsigned int qid, char word_pos ){
+TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
    char ptr=0;
-   int pos;
+   char pos;
    while( ptr < word_sz ){
       pos = word[ptr] - 'a';
       if( node->children[pos] == 0 ){
@@ -147,10 +143,7 @@ struct HammingNode{
 	char depth;
 	char tcost;
 };
-
-// TODO - BE CAREFULL WITH THE GLOBAL STACK IN PARALLEL CODE
-std::vector<HammingNode> *stack=new std::vector<HammingNode>();
-void TrieHammingSearchWord(TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
+void TrieHammingSearchWord(std::vector<HammingNode> *hamming_stack, TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
 	HammingNode current, n;
 	char j;
 
@@ -161,13 +154,13 @@ void TrieHammingSearchWord(TrieNode* node, const char* word, int word_sz, Result
 		   current.node = node->children[j];
 		   current.letter = 'a' + j;
 		   current.tcost = 0;
-		   stack->push_back(current);
+		   hamming_stack->push_back(current);
 	   }
     }
 
-	while( !stack->empty() ){
-		current = stack->back();
-		stack->pop_back();
+	while( !hamming_stack->empty() ){
+		current = hamming_stack->back();
+		hamming_stack->pop_back();
 
 		if( current.letter != word[current.depth-1] ){
 			current.tcost++;
@@ -185,7 +178,7 @@ void TrieHammingSearchWord(TrieNode* node, const char* word, int word_sz, Result
 						   n.node = current.node->children[j];
 						   n.letter = 'a' + j;
 						   n.tcost = current.tcost;
-						   stack->push_back(n);
+						   hamming_stack->push_back(n);
 					   }
 				    }
 			}
@@ -198,8 +191,7 @@ struct EditNode{
 	char previous[MAX_WORD_LENGTH+1];
 	char letter;
 };
-std::vector<EditNode> *edit_stack=new std::vector<EditNode>();
-void TrieEditSearchWord_Recursive(TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
+void TrieEditSearchWord(std::vector<EditNode> *edit_stack, TrieNode* node, const char* word, int word_sz, ResultTrieSearch* results, char maxCost ){
     EditNode c, n;
     char current[MAX_WORD_LENGTH+1];
     char i, insertCost, deleteCost, replaceCost, j, k;
@@ -258,80 +250,6 @@ void TrieEditSearchWord_Recursive(TrieNode* node, const char* word, int word_sz,
 	}
 }
 
-/*
-void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
-   char* currentRow = (char*)malloc(word_sz+1);
-   if( !currentRow ){
-      err_mem( "error allocating current row" );
-   }
-
-   currentRow[0] = previousRow[0] + 1;
-
-   char i, insertCost, deleteCost, replaceCost, j;
-   for( i=1; i<=word_sz; i++ ){
-
-	   if( word[i-1] == letter ){
-		   currentRow[i] = previousRow[i-1];
-	   }else{
-		   insertCost = currentRow[i-1] + 1;
-		   deleteCost = previousRow[i] + 1;
-		   replaceCost = previousRow[i-1] + 1;
-		   // find the minimum for this column
-		   insertCost = insertCost < replaceCost ? insertCost : replaceCost;
-		   currentRow[i] = insertCost < deleteCost ? insertCost : deleteCost;
-	   }
-   }
-
-   if( currentRow[word_sz] <= maxCost && node->qids!=0 ){
-       // ADD THE node->qids[] INTO THE RESULTS
-	   for( QueryArrayList::iterator it=node->qids->begin(), end=node->qids->end() ; it != end; it++ ){
-	       results->qids->push_back(*it);
-	   }
-   }
-
-   // if there are more changes available recurse
-   for( i=0; i<=word_sz; i++ ){
-      if( currentRow[i] <= maxCost ){
-	      for( j=0; j<VALID_CHARS; j++ ){
-             if( node->children[j] != 0 ){
-                TrieEditSearchWord_Recursive(node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
-	         }
-          }
-	      break; // break because we only need one occurence of cost less than maxCost
-       }
-   }
-   free(currentRow);
-}
-*/
-
-ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *results, const char* word, char sz, char maxCost, char hammingORedit ){
-	char i;
-
-	TrieEditSearchWord_Recursive( root,	word, sz, results, maxCost);
-	/*
-	if (hammingORedit == 2) {
-		char *currentRow = (char*) malloc(sz + 1);
-		if (!currentRow) {
-			err_mem("error allocating TrieHamming");
-		}
-		// create the current row // 0,1,2,3,4,,,sz
-		for (i = 0; i <= sz; i++) {
-			currentRow[i] = i;
-		}
-		for (i = 0; i < VALID_CHARS; ++i) {
-			if (root->children[i] != 0) {
-				TrieEditSearchWord_Recursive((TrieNode*) root->children[i],
-						i + 'a', word, sz, currentRow, results, maxCost);
-			}
-		}
-		free(currentRow);
-	}
-*/
-
-   return results;
-}
-
-
 /********************************************************************************************
  *  TRIE STRUCTURE END
  ********************************************************************************************/
@@ -377,10 +295,14 @@ TrieNode *trie_exact;
 TrieNode **trie_hamming;
 TrieNode **trie_edit;
 
+// TODO - BE CAREFULL WITH THE GLOBAL STACK IN PARALLEL CODE
+std::vector<HammingNode> *hamming_stack=new std::vector<HammingNode>();
+std::vector<EditNode> *edit_stack=new std::vector<EditNode>();
+
 QuerySet *querySet; // std::vector<QuerySetNode*>
 DocResults *docResults; // std::list<DocResultsNode>
 
-//VisitedWords visited;
+
 
 /********************************************************************************************
  *  GLOBALS END
@@ -406,7 +328,7 @@ ErrorCode InitializeIndex(){
     trie_edit[3] = TrieNode_Constructor();
 
     querySet = new QuerySet();
-    // add dummy query to start from index 1
+    // add dummy query to start from index 1 because query ids start from 1 instead of 0
     querySet->push_back((QuerySetNode*)malloc(sizeof(QuerySetNode)));
     docResults = new DocResults();
 
@@ -434,6 +356,9 @@ ErrorCode DestroyIndex(){
     }
     delete querySet;
     delete docResults;
+
+    delete edit_stack;
+    delete hamming_stack;
 
 	return EC_SUCCESS;
 }
@@ -547,14 +472,14 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
     	sz = end-start;
     	TrieExactSearchWord( (TrieNode*)trie_exact, results, start, sz );
-    	TrieHammingSearchWord((TrieNode*)trie_hamming[0], start, sz, results, 0 );
-    	TrieHammingSearchWord((TrieNode*)trie_hamming[1], start, sz, results, 1 );
-    	TrieHammingSearchWord((TrieNode*)trie_hamming[2], start, sz, results, 2 );
-    	TrieHammingSearchWord((TrieNode*)trie_hamming[3], start, sz, results, 3 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_edit[0], results, start, sz, 0, 2 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_edit[1], results, start, sz, 1, 2 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_edit[2], results, start, sz, 2, 2 );
-    	TrieEditHammingSearchWord( (TrieNode*)trie_edit[3], results, start, sz, 3, 2 );
+    	TrieHammingSearchWord(hamming_stack, (TrieNode*)trie_hamming[0], start, sz, results, 0 );
+    	TrieHammingSearchWord(hamming_stack, (TrieNode*)trie_hamming[1], start, sz, results, 1 );
+    	TrieHammingSearchWord(hamming_stack, (TrieNode*)trie_hamming[2], start, sz, results, 2 );
+    	TrieHammingSearchWord(hamming_stack, (TrieNode*)trie_hamming[3], start, sz, results, 3 );
+    	TrieEditSearchWord(edit_stack, (TrieNode*)trie_edit[0], start, sz, results, 0);
+    	TrieEditSearchWord(edit_stack, (TrieNode*)trie_edit[1], start, sz, results, 1);
+    	TrieEditSearchWord(edit_stack, (TrieNode*)trie_edit[2], start, sz, results, 2);
+    	TrieEditSearchWord(edit_stack, (TrieNode*)trie_edit[3], start, sz, results, 3);
     }
 
     //results->qids->sort(compareQueryNodes);
