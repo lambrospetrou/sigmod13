@@ -143,48 +143,29 @@ ResultTrieSearch* TrieExactSearchWord( TrieNode* root, ResultTrieSearch *results
 }
 
 
-void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
-   char* currentRow = (char*)malloc(word_sz+1);
-   if( !currentRow ){
-      err_mem( "error allocating current row" );
+void TrieHammingSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char tcost, char depth, ResultTrieSearch* results, char maxCost ){
+
+   if( word[depth-1] != letter ){
+	   tcost++;
    }
 
-   currentRow[0] = previousRow[0] + 1;
-
-   char i,j;
-   for( i=1; i<=word_sz; i++ ){
-      if( word[i-1] != letter ){
-         currentRow[i] = previousRow[i-1] + 1;
-      }else{
-         currentRow[i] = previousRow[i-1];
-      }
-   }
-
-   if( currentRow[word_sz] <= maxCost && node->qids!=0 ){
-       // ADD THE node->qids[] INTO THE RESULTS
-	   for( QueryArrayList::iterator it=node->qids->begin(), end=node->qids->end() ; it != end; it++ ){
-		   if( it->qid == 92 ){
-			   fprintf( stderr, "\n\nmaxCost: %d currentRow[sz]: %d letter: %c word: %s\n\n",maxCost, currentRow[word_sz], letter, word  );
+   if( tcost <=maxCost ){
+	   if( word_sz==depth && node->qids!=0 ){
+		   // ADD THE node->qids[] INTO THE RESULTS
+		   for( QueryArrayList::iterator it=node->qids->begin(), end=node->qids->end() ; it != end; it++ ){
+			   results->qids->push_back(*it);
 		   }
-	       results->qids->push_back(*it);
+	   }else if( word_sz > depth ){
+		   // recurse even further
+		   char j;
+		   for( j=0; j<VALID_CHARS; j++ ){
+			   if( node->children[j] != 0 ){
+				   TrieHammingSearchWord_Recursive( node->children[j], 'a'+j, word, word_sz, tcost, depth+1, results, maxCost);
+			   }
+		   }
 	   }
    }
 
-
-
-   // if there are more changes available recurse
-   for( i=0; i<=word_sz; i++ ){
-      if( currentRow[i] <= maxCost ){
-	      for( j=0; j<VALID_CHARS; j++ ){
-             if( node->children[j] != 0 ){
-                TrieHammingSearchWord_Recursive( node->children[j], 'a'+j, word, word_sz, currentRow, results, maxCost);
-	         }
-          }
-	      break; // break because we only need one occurence of cost less than maxCost
-       }
-   }
-
-   free(currentRow);
 }
 
 void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word, int word_sz, char*previousRow, ResultTrieSearch* results, char maxCost ){
@@ -244,39 +225,34 @@ void TrieEditSearchWord_Recursive(TrieNode* node, char letter, const char* word,
 }
 
 ResultTrieSearch* TrieEditHammingSearchWord( TrieNode* root, ResultTrieSearch *results, const char* word, char sz, char maxCost, char hammingORedit ){
-   char *currentRow = (char*)malloc(sz+1);
-   if( !currentRow || !results ){
-      err_mem( "error allocating TrieHamming" );
-   }
-   // create the current row // 0,1,2,3,4,,,sz
-   char i;
-   for( i=0; i<=sz; i++ ){
-      currentRow[i]=i;
-   }
-   // for each children branch of the trie search the word
-   for( i=0; i<VALID_CHARS; ++i ){
-      if( root->children[i] != 0 ){
-    	  if( hammingORedit == 1 )
-    		  TrieHammingSearchWord_Recursive(
-    			   (TrieNode*)root->children[i],
-	               i +'a',
-				   word,
-				   sz,
-				   currentRow,
-				   results,
-				   maxCost);
-    	  else if( hammingORedit == 2 )
-    		  TrieEditSearchWord_Recursive(
-    			   (TrieNode*)root->children[i],
-    		  	   i +'a',
-    		  	   word,
-    		  	   sz,
-    		  	   currentRow,
-    		  	   results,
-    		  	   maxCost);
-      }
-   }
-   free( currentRow );
+	char i;
+
+	if (hammingORedit == 1) {
+		for (i = 0; i < VALID_CHARS; ++i) {
+			if (root->children[i] != 0) {
+				TrieHammingSearchWord_Recursive((TrieNode*) root->children[i],
+						i + 'a', word, sz, 0, 1, results, maxCost);
+			}
+		}
+	} else if (hammingORedit == 2) {
+		char *currentRow = (char*) malloc(sz + 1);
+		if (!currentRow) {
+			err_mem("error allocating TrieHamming");
+		}
+		// create the current row // 0,1,2,3,4,,,sz
+		for (i = 0; i <= sz; i++) {
+			currentRow[i] = i;
+		}
+		for (i = 0; i < VALID_CHARS; ++i) {
+			if (root->children[i] != 0) {
+				TrieEditSearchWord_Recursive((TrieNode*) root->children[i],
+						i + 'a', word, sz, currentRow, results, maxCost);
+			}
+		}
+		free(currentRow);
+	}
+
+
    return results;
 }
 
@@ -509,12 +485,11 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     //results->qids->sort(compareQueryNodes);
     std::stable_sort( results->qids->begin(), results->qids->end(), compareQueryNodes );
 
+/*
     fprintf( stderr, "\ndoc[%u] results->qids: %p [size: %lu]\n", doc_id ,results->qids, results->qids->size() );
     for( QueryArrayList::iterator it=results->qids->begin(), end=results->qids->end(); it != end; it++ )
     	fprintf( stderr, "%u[%d][%d] ", it->qid, querySet->at(it->qid)->words_num, it->pos );
-
-    if( doc_id == 19 )
-    	exit(1);
+*/
 
     std::vector<QueryID> ids;
     char counter=0;
