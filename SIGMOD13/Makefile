@@ -36,8 +36,8 @@ CC  = gcc
 CXX = g++
 #CFLAGS=-O3 -fPIC -Wall -g -I. -I./include
 CFLAGS=-O3 -fPIC -Wall -g -I. -I./include
-CXXFLAGS=$(CFLAGS)
-LDFLAGS=-lpthread
+CXXFLAGS=$(CFLAGS) 
+LDFLAGS=-lpthread 
 
 # The programs that will be built
 PROGRAMS=testdriver
