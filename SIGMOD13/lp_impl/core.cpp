@@ -813,8 +813,6 @@ struct TrieNodeVisited{
    TrieNodeVisited* children[VALID_CHARS];
    char exists;
 };
-
-// TRIE FUNCTIONS
 TrieNodeVisited* TrieNodeVisited_Constructor(){
    TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
    if( !n ) err_mem("error allocating TrieNode");
@@ -850,6 +848,7 @@ char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
 /********************************************************************************************
  *  TRIE VISITED STRUCTURE END
  ********************************************************************************************/
+
 
 
 
@@ -969,6 +968,154 @@ void* TrieSearchWord( void* args ){
 /********************************************************************************************
  *  GLOBALS END
  ********************************************************************************************/
+
+
+
+
+
+
+/********************************************************************************************
+ * TRIE LP_MERGESORT STRUCTURE
+ *************************************/
+struct TrieNodeLPMergesort{
+	TrieNodeLPMergesort* children[10];
+    unsigned int qid;
+    char pos[MAX_QUERY_WORDS];
+    char entries;
+    char valid;
+};
+
+TrieNodeLPMergesort *lp_mergesort_tries[NUM_THREADS+1];
+
+// TRIE FUNCTIONS
+TrieNodeLPMergesort* TrieNodeLPMergesort_Constructor(){
+	TrieNodeLPMergesort* n = (TrieNodeLPMergesort*)malloc(sizeof(TrieNodeLPMergesort));
+    if( !n ) err_mem("error allocating TrieNode");
+    memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeLPMergesort*) );
+    n->qid = 0;
+    n->pos[0] = n->pos[1] = n->pos[2] = n->pos[3] = n->pos[4] = -1;
+    n->entries = 0;
+    n->valid = 0;
+    return n;
+}
+void TrieNodeLPMergesort_Destructor( TrieNodeLPMergesort* node ){
+    for( char i=0; i<VALID_CHARS; i++ ){
+    	if( node->children[i] != 0 ){
+    		TrieNodeLPMergesort_Destructor( node->children[i] );
+    	}
+    }
+    free( node );
+}
+
+// Returns 0 if new word added or 1 if existed
+void TrieLPMergesortInsert( TrieNodeLPMergesort* node, unsigned int qid, char pos ){
+   char ptr, i;
+   unsigned int tqid = qid;
+   for( ptr=0; tqid > 0; ptr++ ){
+      pos = tqid % 10;
+      tqid /= 10;
+      if( node->children[pos] == 0 ){
+          node->children[pos] = TrieNodeLPMergesort_Constructor();
+      }
+      node = node->children[pos];
+   }
+   // check if we have a different pos
+   if( node->pos == -1 ){
+       node->entries++;
+       node->pos = 1;
+       node->valid = 1;
+       node->qid = qid;
+   }
+}
+
+void TrieLPMergesortCheckQueries( TrieNodeLPMergesort* root ){
+	std::vector<TrieNodeLPMergesort*> stack;
+	char i;
+	// add the children for this trie
+	for( i=0; i<10; i++ )
+		if( root->children[i] )
+			stack.push_back(root->children[i]);
+	TrieNodeLPMergesort* c;
+	while( !stack.empty() ){
+		c = stack.back();
+		stack.pop_back();
+		// check the current node if it's a valid
+		if( c->valid ){
+			// we must check that the query satisfies constraints
+			if( c->entries == querySet->at( c->qid )->words_num ){
+				// this is a valid qid and must be included
+                // may be inserted in another structure for final results
+
+			}else{
+				c->valid = 0;
+			}
+		}
+		// add the children for this node
+		for( i=0; i<10; i++ )
+			if( c->children[i] )
+				stack.push_back(c->children[i]);
+	}
+}
+
+// merges Other's nodes into root
+void TrieLPMergesortMerge( TrieNodeLPMergesort* root, TrieNodeLPMergesort* other ){
+	std::vector<TrieNodeLPMergesort*> stack;
+	char i;
+	// add the children for this trie
+	for( i=0; i<10; i++ )
+		if( other->children[i] )
+			stack.push_back(other->children[i]);
+	TrieNodeLPMergesort* c;
+	while( !stack.empty() ){
+		c = stack.back();
+		stack.pop_back();
+		// check the current node if it's a valid
+		if( c->valid ){
+			for( char i=0; i<c->entries; i++ )
+			    TrieLPMergesortInsert( root, c->qid, c->pos[i] );
+		}
+		// add the children for this node
+		for( i=0; i<10; i++ )
+			if( c->children[i] )
+				stack.push_back(c->children[i]);
+	}
+}
+
+// returns the valid nodes inside an array
+QueryID* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
+    std::vector<QueryID> ids;
+	std::vector<TrieNodeLPMergesort*> queue;
+	char i;
+	unsigned int front=0, sz;
+	// add the children for this trie
+	for( i=0; i<10; i++ )
+		if( root->children[i] )
+			queue.push_back(root->children[i]);
+	TrieNodeLPMergesort* c;
+	while( !queue.empty() ){
+		c = queue[front];
+		front++;
+		// check the current node if it's a valid
+		if( c->valid ){
+			ids.push_back( c->qid );
+		}
+		// add the children for this node
+		for( i=0; i<10; i++ )
+			if( c->children[i] )
+				queue.push_back(c->children[i]);
+	}
+	QueryID* array = (QueryID*)malloc( sizeof(QueryID)*ids.size() );
+	for( front=0, sz=ids.size(); front<sz; front++ )
+		array[front] = ids[front];
+	return array;
+}
+
+/********************************************************************************************
+ *  TRIE LP_MERGESORT STRUCTURE END
+ ********************************************************************************************/
+
+
+
 
 
 
