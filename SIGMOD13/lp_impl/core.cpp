@@ -558,7 +558,7 @@ thr_pool_destroy(thr_pool_t *pool)
 #define NO_LP_LOCKS_ENABLED
 //#define LP_LOCKS_ENABLED
 
-#define NUM_THREADS 18
+#define NUM_THREADS 24
 #define TRIES_EACH_TYPE 4
 #define TOTAL_SEARCHERS (2*TRIES_EACH_TYPE+1)
 
@@ -732,7 +732,6 @@ struct EditNode{
 	char previous[MAX_WORD_LENGTH+1];
 	char letter;
 };
-
 void TrieEditSearchWord(LockingMech* lockmech, TrieNode* node, const char* word, int word_sz, char tid, ResultTrieSearch* local_results, char maxCost ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
@@ -807,6 +806,50 @@ void TrieEditSearchWord(LockingMech* lockmech, TrieNode* node, const char* word,
  *  TRIE STRUCTURE END
  ********************************************************************************************/
 
+/********************************************************************************************
+ * TRIE VISITED STRUCTURE
+ *************************************/
+struct TrieNodeVisited{
+   TrieNodeVisited* children[VALID_CHARS];
+   char exists;
+};
+
+// TRIE FUNCTIONS
+TrieNodeVisited* TrieNodeVisited_Constructor(){
+   TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
+   if( !n ) err_mem("error allocating TrieNode");
+   memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeVisited*) );
+   n->exists = 0;
+   return n;
+}
+void TrieNodeVisited_Destructor( TrieNodeVisited* node ){
+    for( char i=0; i<VALID_CHARS; i++ ){
+    	if( node->children[i] != 0 ){
+            TrieNodeVisited_Destructor( node->children[i] );
+    	}
+    }
+    free( node );
+}
+// Returns 0 if new word added or 1 if existed
+char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
+   char ptr, pos, existed = 1;
+   for( ptr=0; ptr<word_sz; ptr++ ){
+      pos = word[ptr] - 'a';
+      if( node->children[pos] == 0 ){
+          node->children[pos] = TrieNodeVisited_Constructor();
+      }
+      node = node->children[pos];
+   }
+   if( !node->exists ){
+	   existed = 0;
+       node->exists = 1;
+   }
+   return existed;
+}
+
+/********************************************************************************************
+ *  TRIE VISITED STRUCTURE END
+ ********************************************************************************************/
 
 
 
@@ -848,7 +891,6 @@ unsigned int tcl_hash( const void *v, char sz ){
 	}
 	return result;
 }
-
 struct CacheEntry{
 	pthread_mutex_t mutex;
 	char word[MAX_WORD_LENGTH+1];
@@ -883,11 +925,13 @@ thr_pool_t* threadpool;
 
 #define WORDS_PROCESSED_BY_THREAD 150
 struct TrieSearchData{
-	const char* words;//[WORDS_PROCESSED_BY_THREAD];
+	const char* words[WORDS_PROCESSED_BY_THREAD];
 	char words_sz[WORDS_PROCESSED_BY_THREAD];
 	short words_num;
 	char padding[128];
 };
+
+
 
 unsigned int MAX_TRIE_SEARCH_DATA = 2048;
 unsigned int current_trie_search_data = 0;
@@ -899,12 +943,13 @@ void* TrieSearchWord( void* args ){
 
 	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
 
-	const char* w = tsd->words;
+	const char* w;
 	char wsz;
 	char tid = lpargs->tid;
 
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
+		w = tsd->words[i];
 		TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
 		TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
 	    TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
@@ -914,7 +959,6 @@ void* TrieSearchWord( void* args ){
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
-		w += wsz + 1; // move to the next word
 	}
 
 	//free( tsd ); - no free because we have 2048 global stacked search data
@@ -1102,10 +1146,12 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	char k,szz;
 	// results are new for each document
 
+	TrieNodeVisited *visited = TrieNodeVisited_Constructor();
+
+
 	///////////////////////////////////////////////
     //int s = gettime();
 
-	unsigned int hash_pos;
     short batch_words=0;
 	TrieSearchData *tsd = NULL;
 	const char *start, *end;
@@ -1118,39 +1164,75 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     	end = start;
     	while( *end >= 'a' && *end <= 'z' ) end++;
     	sz = end-start;
-        batch_words++;
 
+
+    	// skip word if found before in the document
+    	if( TrieVisitedIS( visited, start, sz ) ){
+    		//fprintf( stderr, "doc[%d] word[%.*s] existed\n", doc_id, sz, start );
+    	   	continue;
+    	}
+
+
+        batch_words++;
     	if( batch_words == 1 ){
     		current_trie_search_data = (current_trie_search_data + 1) % MAX_TRIE_SEARCH_DATA;
     		tsd = &trie_search_data_pool[current_trie_search_data];
-    		tsd->words = start;
     	}
+    	tsd->words[batch_words-1] = start;
     	tsd->words_sz[batch_words-1] = sz;
 
-    	if( batch_words == WORDS_PROCESSED_BY_THREAD  ){
+    	if( batch_words == WORDS_PROCESSED_BY_THREAD ){
     		tsd->words_num = batch_words;
     		batch_words = 0;
     		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
     	}else if( *end == '\0' ){
     		// very few words or the last ones so just handle them yourself
     		// the same thing the THREAD_JOB does
-    		const char* w = tsd->words;
+    		const char* w;
     		char wsz;
-    			for( int i=0, j=batch_words; i<j; i++ ){
-    				wsz = tsd->words_sz[i];
-    				TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
-    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
-    			    TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
-    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[2], w, wsz, 0, &global_results[tid], 2 );
-    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[3], w, wsz, 0, &global_results[tid], 3 );
-    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[0], w, wsz, 0, &global_results[tid], 0);
-    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
-    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
-    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
-    				w += wsz + 1; // move to the next word
-    			}
+    		for( int i=0, j=batch_words; i<j; i++ ){
+    			wsz = tsd->words_sz[i];
+    			w = tsd->words[i];
+    			TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
+    			TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
+    		    TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
+    			TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[2], w, wsz, 0, &global_results[tid], 2 );
+    			TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[3], w, wsz, 0, &global_results[tid], 3 );
+    			TrieEditSearchWord( &global_results_locks[tid], trie_edit[0], w, wsz, 0, &global_results[tid], 0);
+    			TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
+    			TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
+    			TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
+    		}
     	}
+
+    	// move on to the next word
     }
+
+    // check if there are words unhandled at the moment because of premature exit of the loop
+    // at the point where we check for previous existence
+    if( batch_words > 0 ){
+        // very few words or the last ones so just handle them yourself
+        // the same thing the THREAD_JOB does
+        const char* w;
+        char wsz;
+        for( int i=0, j=batch_words; i<j; i++ ){
+        	wsz = tsd->words_sz[i];
+        	w = tsd->words[i];
+        	TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
+        	TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
+            TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
+        	TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[2], w, wsz, 0, &global_results[tid], 2 );
+        	TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[3], w, wsz, 0, &global_results[tid], 3 );
+        	TrieEditSearchWord( &global_results_locks[tid], trie_edit[0], w, wsz, 0, &global_results[tid], 0);
+        	TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
+        	TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
+        	TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
+        }
+    }
+
+
+    // destroy visited table
+    TrieNodeVisited_Destructor( visited );
 
     // //////////////////////////
     // FIND A WAY TO SYNCHRONIZE THREADPOOL
