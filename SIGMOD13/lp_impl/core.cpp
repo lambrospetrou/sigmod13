@@ -551,8 +551,6 @@ thr_pool_destroy(thr_pool_t *pool)
 }
 
 
-
-
 /********************************************************************************************
  *  THREADPOOL STRUCTURE END
  ********************************************************************************************/
@@ -588,8 +586,8 @@ struct _ResultTrieSearch{
 	QueryArrayList *qids;
 };
 // both initialized in InitializeIndex()
-ResultTrieSearch global_results[NUM_THREADS];
-LockingMech global_results_locks[NUM_THREADS]; // one lock for each result set
+ResultTrieSearch global_results[NUM_THREADS+1];
+LockingMech global_results_locks[NUM_THREADS+1]; // one lock for each result set
 
 typedef struct _TrieNode TrieNode;
 struct _TrieNode{
@@ -859,21 +857,23 @@ TrieNode **trie_edit;
 QuerySet *querySet; // std::vector<QuerySetNode*>
 DocResults *docResults; // std::list<DocResultsNode>
 
-
 // THREADPOOL
 thr_pool_t* threadpool;
 
 // STRUCTURES FOR PTHREADS
 
-#define WORDS_PROCESSED_BY_THREAD 100
+#define WORDS_PROCESSED_BY_THREAD 150
 struct TrieSearchData{
-	//const char* word;
-	//int word_sz;
-	char tid;
 	const char* words;//[WORDS_PROCESSED_BY_THREAD];
 	char words_sz[WORDS_PROCESSED_BY_THREAD];
-	char words_num;
+	short words_num;
+	char padding[128];
 };
+
+unsigned int MAX_TRIE_SEARCH_DATA = 2048;
+unsigned int current_trie_search_data = 0;
+std::vector<TrieSearchData> trie_search_data_pool;
+
 void* TrieSearchWord( void* args ){
 	LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
 	TrieSearchData *tsd = (TrieSearchData *)lpargs->args;
@@ -887,7 +887,6 @@ void* TrieSearchWord( void* args ){
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 
 		wsz = tsd->words_sz[i];
-		//fprintf( stderr, "w[%.*s] s[%d]\n", tsd->words_sz[i], tsd->words[i], tsd->words_sz[i] );
 
 		TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
 		TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
@@ -899,7 +898,7 @@ void* TrieSearchWord( void* args ){
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
 
-		w += wsz + 1;
+		w += wsz + 1; // move to the next word
 
 //
 //		TrieExactSearchWord( &global_results_locks[tsd->tid], trie_exact, tsd->word, tsd->word_sz, 0, &global_results[tsd->tid] );
@@ -914,7 +913,7 @@ void* TrieSearchWord( void* args ){
 
 	}
 
-	free( tsd );
+	//free( tsd ); - no free because we have 2048 global stacked search data
 	return 0;
 }
 
@@ -945,9 +944,13 @@ ErrorCode InitializeIndex(){
 
     //global_results_locks = (LockingMech*)malloc(sizeof(LockingMech)*NUM_THREADS);
     //global_results = (ResultTrieSearch*)malloc( sizeof(ResultTrieSearch)*NUM_THREADS );
-    for( char i=0; i<NUM_THREADS; i++ ){
+    for( char i=0; i<NUM_THREADS+1; i++ ){
     	global_results[i].qids = new QueryArrayList();
+    	global_results[i].qids->resize(128);
+    	global_results[i].qids->clear();
     }
+
+    trie_search_data_pool.resize(MAX_TRIE_SEARCH_DATA);
 
     querySet = new QuerySet();
     // add dummy query to start from index 1 because query ids start from 1 instead of 0
@@ -977,7 +980,7 @@ ErrorCode DestroyIndex(){
     free( trie_edit );
 
     //free( global_results_locks );
-    for( char i=0; i<NUM_THREADS; i++ ){
+    for( char i=0; i<NUM_THREADS+1; i++ ){
       	delete global_results[i].qids;
     }
     //free( global_results );
@@ -1078,13 +1081,13 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	// results are new for each document
 
 	///////////////////////////////////////////////
-    int s = gettime();
+    //int s = gettime();
 
-    char batch_words=0;
-	TrieSearchData *tsd;
+    short batch_words=0;
+	TrieSearchData *tsd = NULL;
 	const char *start, *end;
 	char sz;
-	char tid=-1;
+	char tid=NUM_THREADS;
     for( start=doc_str; *start; start = end ){
 	    // FOR EACH WORD DO THE MATCHING
 
@@ -1095,17 +1098,35 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         batch_words++;
 
     	if( batch_words == 1 ){
-    		tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
-    		tid = (tid + 1) % NUM_THREADS;
-    		tsd->tid = tid;
+    		current_trie_search_data = (current_trie_search_data + 1) % MAX_TRIE_SEARCH_DATA;
+    		tsd = &trie_search_data_pool[current_trie_search_data];
+//    		tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
     		tsd->words = start;
     	}
     	tsd->words_sz[batch_words-1] = sz;
 
-    	if( batch_words == WORDS_PROCESSED_BY_THREAD || *end == '\0' ){
+    	if( batch_words == WORDS_PROCESSED_BY_THREAD  ){
     		tsd->words_num = batch_words;
     		batch_words = 0;
     		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
+    	}else if( *end == '\0' ){
+    		// very few words or the last ones so just handle them yourself
+    		// the same thing the THREAD_JOB does
+    		const char* w = tsd->words;
+    		char wsz;
+    			for( int i=0, j=batch_words; i<j; i++ ){
+    				wsz = tsd->words_sz[i];
+    				TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
+    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
+    			    TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
+    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[2], w, wsz, 0, &global_results[tid], 2 );
+    				TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[3], w, wsz, 0, &global_results[tid], 3 );
+    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[0], w, wsz, 0, &global_results[tid], 0);
+    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
+    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
+    				TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
+    				w += wsz + 1; // move to the next word
+    			}
     	}
 
 //      fprintf( stderr, "doc[%d] word: %.*s\n", doc_id, sz, start );
@@ -1123,19 +1144,19 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     /////////////////////////////
     thr_pool_wait( threadpool );
 
-    fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
+    //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
 
     // TODO - merge the results - CAN BE PARALLED
-    for( k=1, szz=NUM_THREADS; k<szz; k++ ){
+    for( k=0, szz=NUM_THREADS; k<szz; k++ ){
     	//fprintf( stderr, "total results[%d]: %d\n", k, results[k]->qids->size() );
     	for( QueryArrayList::iterator it=global_results[k].qids->begin(), end=global_results[k].qids->end(); it != end; it++ ){
-    		global_results[0].qids->push_back(*it);
+    		global_results[NUM_THREADS].qids->push_back(*it);
     	}
     }
 
     ResultTrieSearch *results_all;
-    results_all = &global_results[0];
+    results_all = &global_results[NUM_THREADS];
 
 
     //int s = gettime();
@@ -1189,7 +1210,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	// Add this result to the set of undelivered results
 	docResults->push_back(doc);
 
-	for( k=0,szz=NUM_THREADS; k<szz; k++ ){
+	for( k=0,szz=NUM_THREADS+1; k<szz; k++ ){
 		global_results[k].qids->clear();
 	}
 
