@@ -192,6 +192,7 @@ create_worker(thr_pool_t *pool)
     (void) pthread_sigmask(SIG_SETMASK, &fillset, &oset);
     error = pthread_create( &pid, &pool->pool_attr, worker_thread, pool);
     (void) pthread_sigmask(SIG_SETMASK, &oset, NULL);
+
     return (error);
 }
 
@@ -250,6 +251,13 @@ job_cleanup(thr_pool_t *pool)
         notify_waiters(pool);
 }
 
+pthread_mutex_t lp_pthreads_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<pthread_t> lp_pthreads;
+struct LP_ThreadArgs{
+	void* args;
+	char tid;
+};
+
 static void *
 worker_thread(void *arg)
 {
@@ -259,7 +267,13 @@ worker_thread(void *arg)
     void *(*func)(void *);
     active_t active;
 
-    fprintf( stderr, "new thread created %p\n", pthread_self() );
+    char tid;
+    pthread_mutex_lock( &lp_pthreads_mutex );
+    lp_pthreads.push_back( pthread_self() );
+    tid = lp_pthreads.size()-1;
+    pthread_mutex_unlock( &lp_pthreads_mutex );
+
+    //fprintf( stderr, "new thread created pthread_t[%p] tid[%d]\n", lp_pthreads.at(tid), tid );
 
     struct timeval tp;
     struct timespec ts;
@@ -321,7 +335,10 @@ worker_thread(void *arg)
             /*
              * Call the specified job function.
              */
-            (void) func(arg);
+            LP_ThreadArgs *lpargs = (LP_ThreadArgs*)malloc(sizeof(LP_ThreadArgs));
+            lpargs->args = arg;
+            lpargs->tid = tid;
+            (void) func(lpargs);
             /*
              * If the job function calls pthread_exit(), the thread
              * calls job_cleanup(pool) and worker_cleanup(pool);
@@ -540,7 +557,8 @@ thr_pool_destroy(thr_pool_t *pool)
  *  THREADPOOL STRUCTURE END
  ********************************************************************************************/
 
-#define LP_LOCKS_ENABLED
+#define NO_LP_LOCKS_ENABLED
+//#define LP_LOCKS_ENABLED
 
 /********************************************************************************************
  *  TRIE STRUCTURE
@@ -551,8 +569,6 @@ thr_pool_destroy(thr_pool_t *pool)
 #define TOTAL_SEARCHERS (2*TRIES_EACH_TYPE+1)
 
 #define VALID_CHARS 26
-
-
 
 typedef struct _QueryNode QueryNode;
 struct _QueryNode{
@@ -858,14 +874,15 @@ struct TrieSearchData{
 	char words_sz[WORDS_PROCESSED_BY_THREAD];
 	char words_num;
 };
-void* TrieSearchWord( void* tsd_ ){
-	TrieSearchData *tsd = (TrieSearchData *)tsd_;
+void* TrieSearchWord( void* args ){
+	LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
+	TrieSearchData *tsd = (TrieSearchData *)lpargs->args;
 
 	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
 
 	const char* w = tsd->words;
 	char wsz;
-	char tid = tsd->tid;
+	char tid = lpargs->tid;
 
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 
@@ -1061,9 +1078,9 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	// results are new for each document
 
 	///////////////////////////////////////////////
-    //int s = gettime();
-	//unsigned int total_words=0;
-	char batch_words=0;
+    int s = gettime();
+
+    char batch_words=0;
 	TrieSearchData *tsd;
 	const char *start, *end;
 	char sz;
@@ -1075,7 +1092,6 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     	end = start;
     	while( *end >= 'a' && *end <= 'z' ) end++;
     	sz = end-start;
-    	//total_words++;
         batch_words++;
 
     	if( batch_words == 1 ){
@@ -1101,12 +1117,13 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 //		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
 
     }
-    //fprintf( stderr, "doc[%u] total_words: %d\n", doc_id, total_words );
 
     // //////////////////////////
     // FIND A WAY TO SYNCHRONIZE THREADPOOL
     /////////////////////////////
     thr_pool_wait( threadpool );
+
+    fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
 
     // TODO - merge the results - CAN BE PARALLED
