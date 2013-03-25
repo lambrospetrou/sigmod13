@@ -1,3 +1,0 @@
-Start Test ...
-Your program has successfully passed all tests.
-Time=37932[37s:932ms]

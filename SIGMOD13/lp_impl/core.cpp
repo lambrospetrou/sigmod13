@@ -848,6 +848,7 @@ DocResults *docResults; // std::list<DocResultsNode>
 thr_pool_t* threadpool;
 
 // STRUCTURES FOR PTHREADS
+/*
 struct TrieSearchData{
 	char type;
 	LockingMech* lock;
@@ -858,23 +859,28 @@ struct TrieSearchData{
 	char tid;
 	char maxCost;
 };
-
+*/
+struct TrieSearchData{
+	const char* word;
+	int word_sz;
+	char tid;
+};
 void* TrieSearchWord( void* tsd_ ){
 	TrieSearchData *tsd = (TrieSearchData *)tsd_;
 	//fprintf( stderr, "[%d] [%p] [%p] [%.*s] [%d] [%p]\n", tsd->type, tsd->lock, tsd->node, tsd->word_sz, tsd->word, tsd->maxCost, tsd->results );
 	//fprintf(stderr, "tid[%d] type[%d] word: %.*s\n", tsd->tid, tsd->type, tsd->word_sz, tsd->word );
-	switch( tsd->type ){
-	case 0:
-		TrieExactSearchWord( tsd->lock, tsd->node, tsd->word, tsd->word_sz, tsd->tid, tsd->results );
-		break;
-	case 1:
-		TrieHammingSearchWord( tsd->lock, tsd->node, tsd->word, tsd->word_sz, tsd->tid, tsd->results, tsd->maxCost );
-		break;
-	case 2:
-		TrieEditSearchWord( tsd->lock, tsd->node, tsd->word, tsd->word_sz, tsd->tid, tsd->results, tsd->maxCost);
-		break;
-    }
-	free( tsd_ );
+
+	TrieExactSearchWord( &global_results_locks[tsd->tid], trie_exact, tsd->word, tsd->word_sz, 0, &global_results[tsd->tid] );
+	TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[0], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 0 );
+    TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[1], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 1 );
+	TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[2], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 2 );
+	TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[3], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 3 );
+	TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[0], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 0);
+	TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[1], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 1 );
+	TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[2], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 2 );
+	TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[3], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 3 );
+
+	free( tsd );
 	return 0;
 }
 
@@ -1033,6 +1039,119 @@ bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
 	return a.pos <= b.pos;
 }
 
+ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
+	char k,szz;
+	// results are new for each document
+	for( k=0,szz=NUM_THREADS; k<szz; k++ ){
+		global_results[k].qids->clear();
+	}
+
+
+	//threadpool = thpool_init( NUM_THREADS );
+
+	//fprintf( stderr, "\n\n%p\n\n", thpool_jobqueue_peek(threadpool) );
+
+	///////////////////////////////////////////////
+    //int s = gettime();
+	unsigned int total_words=0;
+	TrieSearchData *tsd;
+	const char *start, *end;
+	char sz;
+	char tid=-1;
+    for( start=doc_str; *start; start = end ){
+	    // FOR EACH WORD DO THE MATCHING
+
+    	while( *start == ' ' ) start++;
+    	end = start;
+    	while( *end >= 'a' && *end <= 'z' ) end++;
+    	sz = end-start;
+    	total_words++;
+
+    	//fprintf( stderr, "doc[%d] word: %.*s\n", doc_id, sz, start );
+        tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
+		tid = (tid + 1) % NUM_THREADS;
+		tsd->tid = tid;
+		tsd->word = start;
+		tsd->word_sz = sz;
+
+		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
+
+    }
+    //fprintf( stderr, "doc[%u] total_words: %d\n", doc_id, total_words );
+
+    // //////////////////////////
+    // FIND A WAY TO SYNCHRONIZE THREADPOOL
+    /////////////////////////////
+    thr_pool_wait( threadpool );
+
+
+    // TODO - merge the results - CAN BE PARALLED
+    for( k=1, szz=NUM_THREADS; k<szz; k++ ){
+    	//fprintf( stderr, "total results[%d]: %d\n", k, results[k]->qids->size() );
+    	for( QueryArrayList::iterator it=global_results[k].qids->begin(), end=global_results[k].qids->end(); it != end; it++ ){
+    		global_results[0].qids->push_back(*it);
+    	}
+    }
+
+    ResultTrieSearch *results_all;
+    results_all = &global_results[0];
+
+
+    //int s = gettime();
+    // TODO - Parallel sorting
+    std::stable_sort( results_all->qids->begin(), results_all->qids->end(), compareQueryNodes );
+    //parallelMergesort( results->qids, results->qids->size(), 4 );
+    //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results->qids->size(), gettime()-s );
+
+    std::vector<QueryID> ids;
+    char counter=0;
+    QueryNode qn_p, qn_c;
+    // IF WE HAVE RESULTS FOR THIS DOCUMENT
+    if( ! results_all->qids->empty() ){
+        qn_p.qid = results_all->qids->begin()->qid;
+        qn_p.pos = results_all->qids->begin()->pos;
+        counter=1;
+
+		for( QueryArrayList::iterator it=++results_all->qids->begin(), end=results_all->qids->end(); it != end; it++ ){
+			qn_c = *it;
+			if( qn_p.qid == qn_c.qid ){
+				if( qn_p.pos == qn_c.pos ){
+					continue;
+				}else{
+					counter++;
+					qn_p.pos = qn_c.pos;
+				}
+			}else{
+				// we have finished checking a query
+				if( counter == querySet->at(qn_p.qid)->words_num ){
+					//fprintf( stderr, "\ncounter: %d %u[%d]\n", counter, qn_p.qid, querySet->at(qn_p.qid)->words_num );
+					ids.push_back(qn_p.qid);
+				}
+				counter = 1;
+				qn_p.pos = qn_c.pos;
+				qn_p.qid = qn_c.qid;
+			}
+		}
+
+    	// handle the last result because the for loop exited without inserting it
+    	if( counter == querySet->at(qn_p.qid)->words_num ){
+    	    ids.push_back(qn_p.qid);
+    	}
+    }
+
+	DocResultsNode doc;
+	doc.docid=doc_id;
+	doc.sz=ids.size();
+	doc.qids=0;
+	if(doc.sz) doc.qids=(QueryID*)malloc(doc.sz*sizeof(unsigned int));
+	for(int i=0, szz=doc.sz;i<szz;i++) doc.qids[i]=ids[i];
+	// Add this result to the set of undelivered results
+	docResults->push_back(doc);
+
+	return EC_SUCCESS;
+}
+
+/*
 // TODO
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	char k,szz;
@@ -1109,17 +1228,17 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
 		}
 
-/*
-    	TrieExactSearchWord( &global_results_locks[0], trie_exact, start, sz, 0, &global_results[0] );
-    	TrieHammingSearchWord( &global_results_locks[1], trie_hamming[0], start, sz, 0, &global_results[1], 0 );
-    	TrieHammingSearchWord( &global_results_locks[2], trie_hamming[1], start, sz, 0, &global_results[2], 1 );
-    	TrieHammingSearchWord( &global_results_locks[3], trie_hamming[2], start, sz, 0, &global_results[3], 2 );
-    	TrieHammingSearchWord( &global_results_locks[4], trie_hamming[3], start, sz, 0, &global_results[4], 3 );
-    	TrieEditSearchWord( &global_results_locks[5], trie_edit[0], start, sz, 0, &global_results[5], 0);
-    	TrieEditSearchWord( &global_results_locks[6], trie_edit[1], start, sz, 0, &global_results[6], 1 );
-    	TrieEditSearchWord( &global_results_locks[7], trie_edit[2], start, sz, 0, &global_results[7], 2 );
-    	TrieEditSearchWord( &global_results_locks[8], trie_edit[3], start, sz, 0, &global_results[8], 3 );
-*/
+
+//    	TrieExactSearchWord( &global_results_locks[0], trie_exact, start, sz, 0, &global_results[0] );
+//    	TrieHammingSearchWord( &global_results_locks[1], trie_hamming[0], start, sz, 0, &global_results[1], 0 );
+//    	TrieHammingSearchWord( &global_results_locks[2], trie_hamming[1], start, sz, 0, &global_results[2], 1 );
+//    	TrieHammingSearchWord( &global_results_locks[3], trie_hamming[2], start, sz, 0, &global_results[3], 2 );
+//    	TrieHammingSearchWord( &global_results_locks[4], trie_hamming[3], start, sz, 0, &global_results[4], 3 );
+//    	TrieEditSearchWord( &global_results_locks[5], trie_edit[0], start, sz, 0, &global_results[5], 0);
+//    	TrieEditSearchWord( &global_results_locks[6], trie_edit[1], start, sz, 0, &global_results[6], 1 );
+//    	TrieEditSearchWord( &global_results_locks[7], trie_edit[2], start, sz, 0, &global_results[7], 2 );
+//    	TrieEditSearchWord( &global_results_locks[8], trie_edit[3], start, sz, 0, &global_results[8], 3 );
+
     }
     //fprintf( stderr, "doc[%u] total_words: %d\n", doc_id, total_words );
 
@@ -1147,11 +1266,11 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     //parallelMergesort( results->qids, results->qids->size(), 4 );
     //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results->qids->size(), gettime()-s );
 
-/*
-    fprintf( stderr, "\ndoc[%u] results->qids: %p [size: %lu]\n", doc_id ,results->qids, results->qids->size() );
-    for( QueryArrayList::iterator it=results->qids->begin(), end=results->qids->end(); it != end; it++ )
-    	fprintf( stderr, "%u[%d][%d] ", it->qid, querySet->at(it->qid)->words_num, it->pos );
-*/
+
+//    fprintf( stderr, "\ndoc[%u] results->qids: %p [size: %lu]\n", doc_id ,results->qids, results->qids->size() );
+//    for( QueryArrayList::iterator it=results->qids->begin(), end=results->qids->end(); it != end; it++ )
+//    	fprintf( stderr, "%u[%d][%d] ", it->qid, querySet->at(it->qid)->words_num, it->pos );
+
 
     //int s = gettime();
 
@@ -1203,7 +1322,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
 	return EC_SUCCESS;
 }
-
+*/
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_query_ids)
