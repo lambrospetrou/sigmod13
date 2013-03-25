@@ -807,15 +807,7 @@ void TrieEditSearchWord(LockingMech* lockmech, TrieNode* node, const char* word,
  *  TRIE STRUCTURE END
  ********************************************************************************************/
 
-/********************************************************************************************
- *  PARALLELISM STRUCTURES
- *************************************/
 
-
-
-/********************************************************************************************
- *  PARALLELISM STRUCTURES END
- ********************************************************************************************/
 
 
 /********************************************************************************************
@@ -843,12 +835,37 @@ typedef std::vector<DocResultsNode> DocResults;
 /********************************************************************************************
  *   STRUCTURE END
  ********************************************************************************************/
+/********************************************************************************************
+ *  CACHE STRUCTURES
+ *************************************/
+unsigned int tcl_hash( const void *v ){
+	const char* string = (char*)v;
+	unsigned int result = 0;
+	int c;
+	while ( (c = *string++) != 0 ) {
+		result += (result<<3) + c;
+	}
+	return result;
+}
 
+struct CacheEntry{
+	pthread_mutex_t mutex;
+	char word[MAX_WORD_LENGTH+1];
+	QueryID *qids;
+};
+typedef std::vector<CacheEntry> Cache;
+#define CACHE_SIZE 100000
+
+/********************************************************************************************
+ *  CACHE STRUCTURES END
+ ********************************************************************************************/
 
 
 /********************************************************************************************
  *  GLOBALS
  *************************************/
+
+Cache *cache_exact;
 
 TrieNode *trie_exact;
 TrieNode **trie_hamming;
@@ -885,9 +902,7 @@ void* TrieSearchWord( void* args ){
 	char tid = lpargs->tid;
 
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
-
 		wsz = tsd->words_sz[i];
-
 		TrieExactSearchWord( &global_results_locks[tid], trie_exact, w, wsz, 0, &global_results[tid] );
 		TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[0], w, wsz, 0, &global_results[tid], 0 );
 	    TrieHammingSearchWord( &global_results_locks[tid], trie_hamming[1], w, wsz, 0, &global_results[tid], 1 );
@@ -897,20 +912,7 @@ void* TrieSearchWord( void* args ){
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[1], w, wsz, 0, &global_results[tid], 1 );
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[2], w, wsz, 0, &global_results[tid], 2 );
 		TrieEditSearchWord( &global_results_locks[tid], trie_edit[3], w, wsz, 0, &global_results[tid], 3 );
-
 		w += wsz + 1; // move to the next word
-
-//
-//		TrieExactSearchWord( &global_results_locks[tsd->tid], trie_exact, tsd->word, tsd->word_sz, 0, &global_results[tsd->tid] );
-//		TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[0], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 0 );
-//	    TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[1], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 1 );
-//		TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[2], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 2 );
-//		TrieHammingSearchWord( &global_results_locks[tsd->tid], trie_hamming[3], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 3 );
-//		TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[0], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 0);
-//		TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[1], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 1 );
-//		TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[2], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 2 );
-//		TrieEditSearchWord( &global_results_locks[tsd->tid], trie_edit[3], tsd->word, tsd->word_sz, 0, &global_results[tsd->tid], 3 );
-
 	}
 
 	//free( tsd ); - no free because we have 2048 global stacked search data
@@ -928,6 +930,11 @@ void* TrieSearchWord( void* args ){
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 ErrorCode InitializeIndex(){
+
+	cache_exact = new Cache();
+	cache_exact->resize(CACHE_SIZE);
+	for( int i=0; i<CACHE_SIZE; i++ )
+		pthread_mutex_init(&cache_exact->at(i).mutex, NULL);
 
 	trie_exact = TrieNode_Constructor();
     trie_hamming = (TrieNode**)malloc(sizeof(TrieNode*)*4);
@@ -966,6 +973,12 @@ ErrorCode InitializeIndex(){
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 ErrorCode DestroyIndex(){
+
+
+	for( int i=0; i<CACHE_SIZE; i++ )
+		pthread_mutex_destroy(&cache_exact->at(i).mutex);
+	delete cache_exact;
+
     TrieNode_Destructor( trie_exact  );
     TrieNode_Destructor( trie_hamming[0] );
     TrieNode_Destructor( trie_hamming[1] );
@@ -1100,7 +1113,6 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     	if( batch_words == 1 ){
     		current_trie_search_data = (current_trie_search_data + 1) % MAX_TRIE_SEARCH_DATA;
     		tsd = &trie_search_data_pool[current_trie_search_data];
-//    		tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
     		tsd->words = start;
     	}
     	tsd->words_sz[batch_words-1] = sz;
@@ -1128,15 +1140,6 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     				w += wsz + 1; // move to the next word
     			}
     	}
-
-//      fprintf( stderr, "doc[%d] word: %.*s\n", doc_id, sz, start );
-//      tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
-//		tid = (tid + 1) % NUM_THREADS;
-//		tsd->tid = tid;
-//		tsd->word = start;
-//		tsd->word_sz = sz;
-//		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
-
     }
 
     // //////////////////////////
