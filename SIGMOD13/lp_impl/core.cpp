@@ -558,15 +558,15 @@ thr_pool_destroy(thr_pool_t *pool)
 #define NO_LP_LOCKS_ENABLED
 //#define LP_LOCKS_ENABLED
 
-/********************************************************************************************
- *  TRIE STRUCTURE
- *************************************/
-
-#define NUM_THREADS 12
+#define NUM_THREADS 18
 #define TRIES_EACH_TYPE 4
 #define TOTAL_SEARCHERS (2*TRIES_EACH_TYPE+1)
 
 #define VALID_CHARS 26
+
+/********************************************************************************************
+ *  TRIE STRUCTURE
+ *************************************/
 
 typedef struct _QueryNode QueryNode;
 struct _QueryNode{
@@ -838,11 +838,12 @@ typedef std::vector<DocResultsNode> DocResults;
 /********************************************************************************************
  *  CACHE STRUCTURES
  *************************************/
-unsigned int tcl_hash( const void *v ){
+unsigned int tcl_hash( const void *v, char sz ){
 	const char* string = (char*)v;
 	unsigned int result = 0;
 	int c;
-	while ( (c = *string++) != 0 ) {
+	while ( sz-- > 0 ) {
+		c = *string++;
 		result += (result<<3) + c;
 	}
 	return result;
@@ -855,6 +856,7 @@ struct CacheEntry{
 };
 typedef std::vector<CacheEntry> Cache;
 #define CACHE_SIZE 100000
+#define VISITED_SIZE 2*CACHE_SIZE
 
 /********************************************************************************************
  *  CACHE STRUCTURES END
@@ -933,8 +935,11 @@ ErrorCode InitializeIndex(){
 
 	cache_exact = new Cache();
 	cache_exact->resize(CACHE_SIZE);
-	for( int i=0; i<CACHE_SIZE; i++ )
+	for( int i=0; i<CACHE_SIZE; i++ ){
+		cache_exact->at(i).qids = 0;
+	    cache_exact->at(i).word[0] = '\0';
 		pthread_mutex_init(&cache_exact->at(i).mutex, NULL);
+	}
 
 	trie_exact = TrieNode_Constructor();
     trie_hamming = (TrieNode**)malloc(sizeof(TrieNode*)*4);
@@ -1089,6 +1094,10 @@ bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
 	return a.pos <= b.pos;
 }
 
+// TODO -
+// TODO - Check for the same words in the same document
+// TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
+
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	char k,szz;
 	// results are new for each document
@@ -1096,6 +1105,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	///////////////////////////////////////////////
     //int s = gettime();
 
+	unsigned int hash_pos;
     short batch_words=0;
 	TrieSearchData *tsd = NULL;
 	const char *start, *end;
@@ -1166,7 +1176,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     // TODO - Parallel sorting
     std::stable_sort( results_all->qids->begin(), results_all->qids->end(), compareQueryNodes );
     //parallelMergesort( results->qids, results->qids->size(), 4 );
-    //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results->qids->size(), gettime()-s );
+    //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results_all->qids->size(), gettime()-s );
 
     std::vector<QueryID> ids;
     char counter=0;
