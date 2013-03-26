@@ -252,7 +252,9 @@ job_cleanup(thr_pool_t *pool)
 }
 
 pthread_mutex_t lp_pthreads_mutex = PTHREAD_MUTEX_INITIALIZER;
-static std::vector<pthread_t> lp_pthreads;
+pthread_t lp_pthreads[16];
+int lp_position=0;
+
 struct LP_ThreadArgs{
 	void* args;
 	char tid;
@@ -269,11 +271,11 @@ worker_thread(void *arg)
 
     char tid;
     pthread_mutex_lock( &lp_pthreads_mutex );
-    lp_pthreads.push_back( pthread_self() );
-    tid = lp_pthreads.size()-1;
+    lp_pthreads[lp_position ] = pthread_self() ;
+    tid = lp_position++;
     pthread_mutex_unlock( &lp_pthreads_mutex );
 
-    //fprintf( stderr, "new thread created pthread_t[%p] tid[%d]\n", lp_pthreads.at(tid), tid );
+    fprintf( stderr, "new thread created pthread_t[%p] tid[%d]\n", lp_pthreads[tid], tid );
 
     struct timeval tp;
     struct timespec ts;
@@ -335,10 +337,7 @@ worker_thread(void *arg)
             /*
              * Call the specified job function.
              */
-            LP_ThreadArgs *lpargs = (LP_ThreadArgs*)malloc(sizeof(LP_ThreadArgs));
-            lpargs->args = arg;
-            lpargs->tid = tid;
-            (void) func(lpargs);
+            (void) func(arg);
             /*
              * If the job function calls pthread_exit(), the thread
              * calls job_cleanup(pool) and worker_cleanup(pool);
@@ -448,6 +447,14 @@ thr_pool_create(unsigned int min_threads, unsigned int max_threads, unsigned int
     }
     (void) pthread_mutex_unlock(&thr_pool_lock);
 
+//    // INSTANTIATE THE MINIMUM THREAD WORKERS - Edited by Lambros Petrou
+//    for( int i=0; i<pool->pool_minimum; i++ ){
+//    	if( create_worker(pool) ){
+//    		perror( "Could not instantiate worker immediately" );
+//    	}
+//    	pool->pool_nthreads++;
+//    }
+
     return (pool);
 }
 
@@ -550,6 +557,11 @@ thr_pool_destroy(thr_pool_t *pool)
     free(pool);
 }
 
+// dummy function to create all the threads
+void* dummy_thread_do(void* a){
+    return NULL;
+}
+
 
 /********************************************************************************************
  *  THREADPOOL STRUCTURE END
@@ -558,7 +570,7 @@ thr_pool_destroy(thr_pool_t *pool)
 #define NO_LP_LOCKS_ENABLED
 //#define LP_LOCKS_ENABLED
 
-#define NUM_THREADS 24
+#define NUM_THREADS 16
 #define TRIES_EACH_TYPE 4
 #define TOTAL_SEARCHERS (2*TRIES_EACH_TYPE+1)
 
@@ -977,21 +989,119 @@ void* TrieSearchWord( void* args ){
 /********************************************************************************************
  * TRIE LP_MERGESORT STRUCTURE
  *************************************/
+
+struct BinaryTreeNode{
+	BinaryTreeNode* left;
+	BinaryTreeNode* right;
+	QueryID qid;
+	char visited;
+};
+
+
+#define LPMERGESORT_CHILDREN 10
 struct TrieNodeLPMergesort{
-	TrieNodeLPMergesort* children[10];
+	TrieNodeLPMergesort* children[LPMERGESORT_CHILDREN];
     unsigned int qid;
     char pos[MAX_QUERY_WORDS];
     char entries;
     char valid;
 };
 
+struct LPMergesortResult{
+	QueryID *ids;
+	unsigned int num_res;
+};
+
+
+
 TrieNodeLPMergesort *lp_mergesort_tries[NUM_THREADS+1];
+
+BinaryTreeNode* BinaryTree_Constructor(){
+	BinaryTreeNode* t = (BinaryTreeNode*)malloc(sizeof(BinaryTreeNode));
+	t->left = 0;
+	t->right = 0;
+	t->qid = 0;
+	t->visited = 0;
+	return t;
+}
+
+void BinaryTree_Destructor( BinaryTreeNode* node ){
+	if( node->left )
+		BinaryTree_Destructor(node->left);
+	if( node->right )
+		BinaryTree_Destructor(node->right);
+	free( node );
+}
+
+void BinaryTreeInsert( BinaryTreeNode* node, QueryID qid ){
+	//fprintf( stderr, "[%d] ", qid );
+	while( 1 ){
+		if( node->qid == qid ){
+			break;
+		}else if( node->qid < qid ){
+			if( node->right ){
+			    node = node->right;
+			    continue;
+			}else{
+				node->right = BinaryTree_Constructor();
+				node = node->right;
+				break;
+			}
+		}else if( node->qid > qid ){
+			if( node->left ){
+				node=node->left;
+				continue;
+			}else{
+				node->left = BinaryTree_Constructor();
+				node = node->left;
+				break;
+			}
+		}
+	}
+	node->qid = qid;
+	//fprintf( stderr, "[%d] ", node->qid );
+}
+
+LPMergesortResult* BinaryTreeTrieFlat( BinaryTreeNode* tree )
+{
+	LPMergesortResult* res = (LPMergesortResult*) malloc(sizeof(LPMergesortResult));
+
+	std::vector<QueryID> ids;
+	std::vector<BinaryTreeNode*> stack;
+
+	// add the children for this trie
+	stack.push_back(tree);
+
+	BinaryTreeNode* c;
+	while (!stack.empty()) {
+		c = stack.back();
+		c->visited = 1;
+		if (c->left && !c->left->visited){
+			stack.push_back(c->left);
+			continue;
+		}
+		stack.pop_back();
+		ids.push_back(c->qid); // PLEASE NOTICE THAT THE FIRST ENTRY IS qid=0 AND SHOULD NOT BE CONSIDERED IN THE FINAL RESULTS
+		if (c->right && !c->right->visited){
+			stack.push_back(c->right);
+		}
+	}
+
+	unsigned int front, sz;
+	res->ids = (QueryID*) malloc(sizeof(QueryID) * ids.size()-1);
+	for (front = 1, sz = ids.size(); front < sz; front++){
+	    //fprintf( stderr, "%d ", ids[front] );
+		res->ids[front-1] = ids[front];
+	}
+	res->num_res = ids.size()-1;
+	return res;
+}
 
 // TRIE FUNCTIONS
 TrieNodeLPMergesort* TrieNodeLPMergesort_Constructor(){
 	TrieNodeLPMergesort* n = (TrieNodeLPMergesort*)malloc(sizeof(TrieNodeLPMergesort));
     if( !n ) err_mem("error allocating TrieNode");
-    memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeLPMergesort*) );
+    memset( n->children, 0, LPMERGESORT_CHILDREN*sizeof(TrieNodeLPMergesort*) );
     n->qid = 0;
     n->pos[0] = n->pos[1] = n->pos[2] = n->pos[3] = n->pos[4] = -1;
     n->entries = 0;
@@ -999,7 +1109,7 @@ TrieNodeLPMergesort* TrieNodeLPMergesort_Constructor(){
     return n;
 }
 void TrieNodeLPMergesort_Destructor( TrieNodeLPMergesort* node ){
-    for( char i=0; i<VALID_CHARS; i++ ){
+    for( char i=0; i<LPMERGESORT_CHILDREN; i++ ){
     	if( node->children[i] != 0 ){
     		TrieNodeLPMergesort_Destructor( node->children[i] );
     	}
@@ -1009,30 +1119,36 @@ void TrieNodeLPMergesort_Destructor( TrieNodeLPMergesort* node ){
 
 // Returns 0 if new word added or 1 if existed
 void TrieLPMergesortInsert( TrieNodeLPMergesort* node, unsigned int qid, char pos ){
-   char ptr, i;
-   unsigned int tqid = qid;
-   for( ptr=0; tqid > 0; ptr++ ){
-      pos = tqid % 10;
-      tqid /= 10;
-      if( node->children[pos] == 0 ){
-          node->children[pos] = TrieNodeLPMergesort_Constructor();
+   char i;
+   unsigned int nqid = qid;
+   for( ; nqid>0;  ){
+	   i = nqid % 10;
+	   nqid /= 10;
+      if( node->children[i] == 0 ){
+          node->children[i] = TrieNodeLPMergesort_Constructor();
       }
-      node = node->children[pos];
+      node = node->children[i];
    }
    // check if we have a different pos
-   if( node->pos == -1 ){
+   if( node->pos[pos] == -1 ){
        node->entries++;
-       node->pos = 1;
+       node->pos[pos] = 1;
        node->valid = 1;
        node->qid = qid;
    }
+}
+
+void TrieLPMergesortFill( TrieNodeLPMergesort* root, QueryArrayList* qids ){
+	for( unsigned int i=0, sz=qids->size(); i<sz; i++ ){
+		TrieLPMergesortInsert(root, qids->at(i).qid, qids->at(i).pos);
+	}
 }
 
 void TrieLPMergesortCheckQueries( TrieNodeLPMergesort* root ){
 	std::vector<TrieNodeLPMergesort*> stack;
 	char i;
 	// add the children for this trie
-	for( i=0; i<10; i++ )
+	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 		if( root->children[i] )
 			stack.push_back(root->children[i]);
 	TrieNodeLPMergesort* c;
@@ -1051,7 +1167,7 @@ void TrieLPMergesortCheckQueries( TrieNodeLPMergesort* root ){
 			}
 		}
 		// add the children for this node
-		for( i=0; i<10; i++ )
+		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 			if( c->children[i] )
 				stack.push_back(c->children[i]);
 	}
@@ -1062,7 +1178,7 @@ void TrieLPMergesortMerge( TrieNodeLPMergesort* root, TrieNodeLPMergesort* other
 	std::vector<TrieNodeLPMergesort*> stack;
 	char i;
 	// add the children for this trie
-	for( i=0; i<10; i++ )
+	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 		if( other->children[i] )
 			stack.push_back(other->children[i]);
 	TrieNodeLPMergesort* c;
@@ -1075,39 +1191,81 @@ void TrieLPMergesortMerge( TrieNodeLPMergesort* root, TrieNodeLPMergesort* other
 			    TrieLPMergesortInsert( root, c->qid, c->pos[i] );
 		}
 		// add the children for this node
-		for( i=0; i<10; i++ )
+		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 			if( c->children[i] )
 				stack.push_back(c->children[i]);
 	}
 }
 
 // returns the valid nodes inside an array
-QueryID* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
-    std::vector<QueryID> ids;
+LPMergesortResult* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
+
+	BinaryTreeNode* binroot = BinaryTree_Constructor();
+
 	std::vector<TrieNodeLPMergesort*> queue;
 	char i;
 	unsigned int front=0, sz;
 	// add the children for this trie
-	for( i=0; i<10; i++ )
+	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 		if( root->children[i] )
 			queue.push_back(root->children[i]);
 	TrieNodeLPMergesort* c;
-	while( !queue.empty() ){
-		c = queue[front];
-		front++;
+	while( front < queue.size() ){
+		c = queue[front++];
 		// check the current node if it's a valid
 		if( c->valid ){
-			ids.push_back( c->qid );
+			//fprintf( stderr, "qid[%u] ", c->qid );
+			BinaryTreeInsert( binroot, c->qid );
 		}
 		// add the children for this node
-		for( i=0; i<10; i++ )
+		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
 			if( c->children[i] )
 				queue.push_back(c->children[i]);
 	}
-	QueryID* array = (QueryID*)malloc( sizeof(QueryID)*ids.size() );
-	for( front=0, sz=ids.size(); front<sz; front++ )
-		array[front] = ids[front];
-	return array;
+
+	LPMergesortResult* res = BinaryTreeTrieFlat( binroot );
+	BinaryTree_Destructor( binroot );
+	return res;
+}
+
+sem_t semaphores[NUM_THREADS+1];
+void* TrieLPMergesort( void* args ){
+	LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
+	char tid = lpargs->tid;
+
+	pthread_mutex_lock( &lp_pthreads_mutex );
+	for (unsigned int i = 0; i < NUM_THREADS; i++) {
+		if (lp_pthreads[i] == pthread_self()) {
+			tid = i;
+			break;
+		}
+	}
+	pthread_mutex_unlock( &lp_pthreads_mutex );
+
+	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[tid].qids );
+	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
+
+	fprintf( stderr, "phase[%d] tid[%d]\n", 0, tid );
+
+	sem_post( &semaphores[tid] );
+
+	int total_threads = NUM_THREADS+1;
+	int working_threads = total_threads>>1;
+    int phase = 0;
+
+	while( tid >= total_threads-working_threads ){
+    	phase++;
+    	fprintf( stderr, "phase[%d] tid[%d]\n", phase, tid );
+
+    	sem_wait( &semaphores[ tid-working_threads ] );
+    	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid-working_threads] );
+    	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
+    	sem_post( &semaphores[ tid ] );
+    	working_threads >>= 1;
+    }
+
+
+	return 0;
 }
 
 /********************************************************************************************
@@ -1124,6 +1282,10 @@ QueryID* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
 
 ErrorCode InitializeIndex(){
 
+	for( char i=0; i<NUM_THREADS+1; i++ )
+	    sem_init( &semaphores[i], 0, 0 );
+
+	/*
 	cache_exact = new Cache();
 	cache_exact->resize(CACHE_SIZE);
 	for( int i=0; i<CACHE_SIZE; i++ ){
@@ -1131,6 +1293,7 @@ ErrorCode InitializeIndex(){
 	    cache_exact->at(i).word[0] = '\0';
 		pthread_mutex_init(&cache_exact->at(i).mutex, NULL);
 	}
+	*/
 
 	trie_exact = TrieNode_Constructor();
     trie_hamming = (TrieNode**)malloc(sizeof(TrieNode*)*4);
@@ -1163,6 +1326,18 @@ ErrorCode InitializeIndex(){
     // Initialize the threadpool with 12 threads
     //threadpool = thpool_init( NUM_THREADS );
     threadpool = thr_pool_create( NUM_THREADS, NUM_THREADS, 2, NULL );
+
+     //INSTANTIATE THE MINIMUM THREAD WORKERS - Edited by Lambros Petrou
+        for( int i=0; i<NUM_THREADS; i++ ){
+//        	pthread_mutex_lock(&threadpool->pool_mutex);
+//        	if( create_worker( threadpool ) ){
+//        		perror( "Could not instantiate worker immediately" );
+//        	}
+//        	threadpool->pool_nthreads++;
+//        	pthread_mutex_unlock(&threadpool->pool_mutex);
+        	thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(dummy_thread_do), NULL );
+        }
+
 	return EC_SUCCESS;
 }
 
@@ -1170,11 +1345,14 @@ ErrorCode InitializeIndex(){
 
 ErrorCode DestroyIndex(){
 
+	for( char i=0; i<NUM_THREADS+1; i++ )
+		sem_destroy( &semaphores[i] );
 
+/*
 	for( int i=0; i<CACHE_SIZE; i++ )
 		pthread_mutex_destroy(&cache_exact->at(i).mutex);
 	delete cache_exact;
-
+*/
     TrieNode_Destructor( trie_exact  );
     TrieNode_Destructor( trie_hamming[0] );
     TrieNode_Destructor( trie_hamming[1] );
@@ -1292,6 +1470,12 @@ bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	char k,szz;
 	// results are new for each document
+	// TODO - With this we might not need the global_results
+	for( k=0; k<NUM_THREADS+1; k++ ){
+		lp_mergesort_tries[k] = TrieNodeLPMergesort_Constructor();
+	}
+
+
 
 	TrieNodeVisited *visited = TrieNodeVisited_Constructor();
 
@@ -1388,7 +1572,32 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
     //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
+    //    for( k=0; k<NUM_THREADS+1; k++ ){
+    //    	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[k].qids );
+    //    }
+    //    TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
 
+    LP_ThreadArgs *args;
+    for( batch_words=0; batch_words<NUM_THREADS; batch_words++ ){
+        args = (LP_ThreadArgs*)malloc( sizeof(LP_ThreadArgs) );
+        args->tid= batch_words;
+        args->args = NULL;
+    	thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieLPMergesort), args);
+    }
+
+//    args = (LP_ThreadArgs*)malloc( sizeof(LP_ThreadArgs) );
+//    args->args = NULL;
+//    args->tid = tid;
+//    TrieLPMergesort( &args );
+
+    thr_pool_wait( threadpool );
+    LPMergesortResult *res = TrieLPMergesortFlat( lp_mergesort_tries[tid] );
+
+
+
+
+
+/*
     // TODO - merge the results - CAN BE PARALLED
     for( k=0, szz=NUM_THREADS; k<szz; k++ ){
     	//fprintf( stderr, "total results[%d]: %d\n", k, results[k]->qids->size() );
@@ -1442,15 +1651,21 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     	    ids.push_back(qn_p.qid);
     	}
     }
+*/
 
 	DocResultsNode doc;
 	doc.docid=doc_id;
-	doc.sz=ids.size();
-	doc.qids=0;
-	if(doc.sz) doc.qids=(QueryID*)malloc(doc.sz*sizeof(unsigned int));
-	for(int i=0, szz=doc.sz;i<szz;i++) doc.qids[i]=ids[i];
+	doc.sz= res->num_res; //ids.size();
+	doc.qids = res->ids;
+	//doc.qids=0;
+	//if(doc.sz) doc.qids=(QueryID*)malloc(doc.sz*sizeof(unsigned int));
+	//for(int i=0, szz=doc.sz;i<szz;i++) doc.qids[i]=ids[i];
 	// Add this result to the set of undelivered results
 	docResults->push_back(doc);
+
+	for( k=0; k<NUM_THREADS+1; k++ ){
+		TrieNodeLPMergesort_Destructor( lp_mergesort_tries[k] );
+	}
 
 	for( k=0,szz=NUM_THREADS+1; k<szz; k++ ){
 		global_results[k].qids->clear();
