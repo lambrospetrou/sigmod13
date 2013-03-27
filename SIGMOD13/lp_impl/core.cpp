@@ -1256,7 +1256,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	for( char i=0; i<TOTAL_WORKERS; i++ )
 	    sem_init( &semaphores[i], 0, 0 );
 
-
+synchronize_all_threads();
 
     //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
@@ -1271,11 +1271,9 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 //    }
 //    TrieLPMergesort( 0, NULL );
 
-    // wait for the last thread to finish
-    //sem_wait( &semaphores[0] );
 
 
-        synchronize_all_threads();
+
 
 
 
