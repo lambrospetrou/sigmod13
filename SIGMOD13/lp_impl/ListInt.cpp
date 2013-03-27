@@ -20,7 +20,6 @@ void ListInt_Destructor(ListInt* l){
 	}
 }
 
-ListInt* insertBack( ListInt** l )
 
 ListInt* insertSorted(ListInt** l, unsigned int val){
 	if( !l || !*l ){

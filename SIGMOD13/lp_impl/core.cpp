@@ -1245,6 +1245,9 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         }
     }
 
+
+
+
     // //////////////////////////
     // FIND A WAY TO SYNCHRONIZE THREADPOOL
     /////////////////////////////
