@@ -56,510 +56,172 @@ void err_mem(char* msg){
  *  THREADPOOL STRUCTURE
  *************************************/
 
-// ORACLE THREADPOOL EXAMPLE
-// http://docs.oracle.com/cd/E19963-01/html/821-1601/ggfbr.html#ggecw
-
-/*
- * Declarations for the clients of a thread pool.
- */
-
-/*
- * The thr_pool_t type is opaque to the client.
- * It is created by thr_pool_create() and must be passed
- * unmodified to the remainder of the interfaces.
- */
-typedef    struct thr_pool    thr_pool_t;
-
-/*
- * Create a thread pool.
- *    min_threads:    the minimum number of threads kept in the pool,
- *            always available to perform work requests.
- *    max_threads:    the maximum number of threads that can be
- *            in the pool, performing work requests.
- *    linger:        the number of seconds excess idle worker threads
- *            (greater than min_threads) linger before exiting.
- *    attr:        attributes of all worker threads (can be NULL);
- *            can be destroyed after calling thr_pool_create().
- * On error, thr_pool_create() returns NULL with errno set to the error code.
- */
-extern    thr_pool_t    *thr_pool_create(unsigned int min_threads, unsigned int max_threads,
-                unsigned int linger, pthread_attr_t *attr);
-
-/*
- * Enqueue a work request to the thread pool job queue.
- * If there are idle worker threads, awaken one to perform the job.
- * Else if the maximum number of workers has not been reached,
- * create a new worker thread to perform the job.
- * Else just return after adding the job to the queue;
- * an existing worker thread will perform the job when
- * it finishes the job it is currently performing.
- *
- * The job is performed as if a new detached thread were created for it:
- *    pthread_create(NULL, attr, void *(*func)(void *), void *arg);
- *
- * On error, thr_pool_queue() returns -1 with errno set to the error code.
- */
-extern    int    thr_pool_queue(thr_pool_t *pool,
-            void *(*func)(void *), void *arg);
-
-/*
- * Wait for all queued jobs to complete.
- */
-extern    void    thr_pool_wait(thr_pool_t *pool);
-
-/*
- * Cancel all queued jobs and destroy the pool.
- */
-extern    void    thr_pool_destroy(thr_pool_t *pool);
-
-
-/*
- * Thread pool implementation.
- * See <thr_pool.h> for interface declarations.
- */
-
-#if !defined(_REENTRANT)
-#define    _REENTRANT
-#endif
-
-#include <stdlib.h>
-#include <signal.h>
-#include <errno.h>
-
-/*
- * FIFO queued job
- */
-typedef struct job job_t;
-struct job {
-    job_t    *job_next;        /* linked list of jobs */
-    void    *(*job_func)(void *);    /* function to call */
-    void    *job_arg;        /* its argument */
+typedef struct _lp_tpjob lp_tpjob;
+struct _lp_tpjob{
+    void *args;
+    void *(*func)(int, void *);
+    lp_tpjob *next;
 };
 
-/*
- * List of active worker threads, linked through their stacks.
- */
-typedef struct active active_t;
-struct active {
-    active_t    *active_next;    /* linked list of threads */
-    pthread_t    active_tid;    /* active thread id */
-};
+typedef struct{
+   int workers_ids;
+   int nthreads;
+   int pending_jobs;
+   lp_tpjob *jobs_head;
+   lp_tpjob *jobs_tail;
 
-/*
- * The thread pool, opaque to the clients.
- */
-struct thr_pool {
-    thr_pool_t    *pool_forw;    /* circular linked list */
-    thr_pool_t    *pool_back;    /* of all thread pools */
-    pthread_mutex_t    pool_mutex;    /* protects the pool data */
-    pthread_cond_t    pool_busycv;    /* synchronization in pool_queue */
-    pthread_cond_t    pool_workcv;    /* synchronization with workers */
-    pthread_cond_t    pool_waitcv;    /* synchronization in pool_wait() */
-    active_t    *pool_active;    /* list of threads performing work */
-    job_t        *pool_head;    /* head of FIFO job queue */
-    job_t        *pool_tail;    /* tail of FIFO job queue */
-    pthread_attr_t    pool_attr;    /* attributes of the workers */
-    int        pool_flags;    /* see below */
-    unsigned int        pool_linger;    /* seconds before idle workers exit */
-    int        pool_minimum;    /* minimum number of worker threads */
-    int        pool_maximum;    /* maximum number of worker threads */
-    int        pool_nthreads;    /* current number of worker threads */
-    int        pool_idle;    /* number of idle workers */
-};
+   pthread_cond_t cond_jobs;
+   pthread_mutex_t mutex_pool;
 
-/* pool_flags */
-#define    POOL_WAIT    0x01        /* waiting in thr_pool_wait() */
-#define    POOL_DESTROY    0x02        /* pool is being destroyed */
+   pthread_t *worker_threads;
 
-/* the list of all created and not yet destroyed thread pools */
-static thr_pool_t *thr_pools = NULL;
+}lp_threadpool;
 
-/* protects thr_pools */
-static pthread_mutex_t thr_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void* args ){
+     lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
+     if( !njob ){
+         perror( "Could not create a lp_tpjob...\n" );
+         return;
+     }
+     njob->args = args;
+     njob->func = func;
+     njob->next = 0;
 
-/* set of all signals */
-static sigset_t fillset;
+     // ENTER POOL CRITICAL SECTION
+     pthread_mutex_lock( &pool->mutex_pool );
+     //////////////////////////////////////
 
-static void *worker_thread(void *);
+     // empty job queue
+     if( pool->pending_jobs == 0 ){
+         pool->jobs_head = njob;
+         pool->jobs_tail = njob;
+     }else{
+         // add new job to the tail of the queue
+         pool->jobs_tail->next = njob;
+         pool->jobs_tail = njob;
+     }
 
-static int
-create_worker(thr_pool_t *pool)
-{
-    sigset_t oset;
-    int error;
-    pthread_t pid;
+     pool->pending_jobs++;
 
-    (void) pthread_sigmask(SIG_SETMASK, &fillset, &oset);
-    error = pthread_create( &pid, &pool->pool_attr, worker_thread, pool);
-    (void) pthread_sigmask(SIG_SETMASK, &oset, NULL);
+     //fprintf( stderr, "job added [%d]\n", pool->pending_jobs );
 
-    return (error);
+     // EXIT POOL CRITICAL SECTION
+     pthread_mutex_unlock( &pool->mutex_pool );
+     //////////////////////////////////////
+
+     // signal any worker_thread that new job is available
+     pthread_cond_signal( &pool->cond_jobs );
 }
 
-/*
- * Worker thread is terminating.  Possible reasons:
- * - excess idle thread is terminating because there is no work.
- * - thread was cancelled (pool is being destroyed).
- * - the job function called pthread_exit().
- * In the last case, create another worker thread
- * if necessary to keep the pool populated.
- */
-static void
-worker_cleanup(thr_pool_t *pool)
-{
-    --pool->pool_nthreads;
-    if (pool->pool_flags & POOL_DESTROY) {
-        if (pool->pool_nthreads == 0)
-            (void) pthread_cond_broadcast(&pool->pool_busycv);
-    } else if (pool->pool_head != NULL &&
-        pool->pool_nthreads < pool->pool_maximum &&
-        create_worker(pool) == 0) {
-        pool->pool_nthreads++;
-    }
-    (void) pthread_mutex_unlock(&pool->pool_mutex);
-}
+lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool ){
+    lp_tpjob* job;
+    // lock pool
+    pthread_mutex_lock( &pool->mutex_pool );
 
-static void
-notify_waiters(thr_pool_t *pool)
-{
-    if (pool->pool_head == NULL && pool->pool_active == NULL) {
-        pool->pool_flags &= ~POOL_WAIT;
-        (void) pthread_cond_broadcast(&pool->pool_waitcv);
-    }
-}
+       while( pool->pending_jobs == 0 )
+           pthread_cond_wait( &pool->cond_jobs, &pool->mutex_pool );
 
-/*
- * Called by a worker thread on return from a job.
- */
-static void
-job_cleanup(thr_pool_t *pool)
-{
-    pthread_t my_tid = pthread_self();
-    active_t *activep;
-    active_t **activepp;
-
-    (void) pthread_mutex_lock(&pool->pool_mutex);
-    for (activepp = &pool->pool_active;
-        (activep = *activepp) != NULL;
-        activepp = &activep->active_next) {
-        if (activep->active_tid == my_tid) {
-            *activepp = activep->active_next;
-            break;
+       // available job pending
+        --pool->pending_jobs;
+        job = pool->jobs_head;
+        pool->jobs_head = pool->jobs_head->next;
+        // if no more jobs available
+        if( pool->jobs_head == 0 ){
+            pool->jobs_tail = 0;
         }
-    }
-    if (pool->pool_flags & POOL_WAIT)
-        notify_waiters(pool);
+
+    //fprintf( stderr, "job removed - remained[%d]\n", pool->pending_jobs );
+
+    // pool unlock
+    pthread_mutex_unlock( &pool->mutex_pool );
+
+    return job;
+}
+// returns an id from 1 to number of threads (eg. threads=12, ids = 1,2,3,4,5,6,7,8,9,10,11,12)
+int lp_threadpool_uniquetid( lp_threadpool* pool ){
+   // lock pool
+   int _tid;
+   pthread_mutex_lock( &pool->mutex_pool );
+   _tid = pool->workers_ids;
+   pool->workers_ids = ( ( pool->workers_ids + 1 ) % (pool->nthreads+1) )  ;
+   pthread_mutex_unlock( &pool->mutex_pool );
+   return _tid;
 }
 
-pthread_mutex_t lp_pthreads_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_t lp_pthreads[16];
-int lp_position=0;
+void* lp_tpworker_thread( void* _pool ){
 
-struct LP_ThreadArgs{
-	void* args;
-	char tid;
-};
+   lp_threadpool* pool = ((lp_threadpool*)_pool);
+   int _tid=lp_threadpool_uniquetid( pool );
+   int i;
 
-static void *
-worker_thread(void *arg)
-{
-    thr_pool_t *pool = (thr_pool_t *)arg;
-    int timedout;
-    job_t *job;
-    void *(*func)(void *);
-    active_t active;
+   //fprintf( stderr, "thread[%d] entered worker_thread infite\n", _tid );
 
-    char tid;
-    pthread_mutex_lock( &lp_pthreads_mutex );
-    lp_pthreads[lp_position ] = pthread_self() ;
-    tid = lp_position++;
-    pthread_mutex_unlock( &lp_pthreads_mutex );
+   for(;;){
 
-    fprintf( stderr, "new thread created pthread_t[%p] tid[%d]\n", lp_pthreads[tid], tid );
+       // fetch next job - blocking method
+       lp_tpjob* njob = lp_threadpool_fetchjob( pool );
 
-    struct timeval tp;
-    struct timespec ts;
+       // execute the function passing in the thread_id - the TID starts from 1 - POOL_THREADS
+       njob->func( _tid , njob->args );
 
-    /*
-     * This is the worker's main loop.  It will only be left
-     * if a timeout occurs or if the pool is being destroyed.
-     */
-    (void) pthread_mutex_lock(&pool->pool_mutex);
-    pthread_cleanup_push( reinterpret_cast<void (*)(void*)>(worker_cleanup), pool);
-    active.active_tid = pthread_self();
-    for (;;) {
-        /*
-         * We don't know what this thread was doing during
-         * its last job, so we reset its signal mask and
-         * cancellation state back to the initial values.
-         */
-        (void) pthread_sigmask(SIG_SETMASK, &fillset, NULL);
-        (void) pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
-        (void) pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-
-        timedout = 0;
-        pool->pool_idle++;
-        if (pool->pool_flags & POOL_WAIT)
-            notify_waiters(pool);
-        while (pool->pool_head == NULL &&
-            !(pool->pool_flags & POOL_DESTROY)) {
-            if (pool->pool_nthreads <= pool->pool_minimum) {
-                (void) pthread_cond_wait(&pool->pool_workcv,
-                    &pool->pool_mutex);
-            } else {
-                gettimeofday(&tp, NULL);
-                ts.tv_sec = tp.tv_sec;
-                ts.tv_nsec = tp.tv_usec * 1000;
-                ts.tv_sec += pool->pool_linger;
-                if (pool->pool_linger == 0 ||
-                    pthread_cond_timedwait(&pool->pool_workcv,
-                    &pool->pool_mutex, &ts) == ETIMEDOUT) {
-                    timedout = 1;
-                    break;
-                }
-            }
-        }
-        pool->pool_idle--;
-        if (pool->pool_flags & POOL_DESTROY)
-            break;
-        if ((job = pool->pool_head) != NULL) {
-            timedout = 0;
-            func = job->job_func;
-            arg = job->job_arg;
-            pool->pool_head = job->job_next;
-            if (job == pool->pool_tail)
-                pool->pool_tail = NULL;
-            active.active_next = pool->pool_active;
-            pool->pool_active = &active;
-            (void) pthread_mutex_unlock(&pool->pool_mutex);
-            pthread_cleanup_push(reinterpret_cast<void (*)(void*)>(job_cleanup), pool);
-            free(job);
-            /*
-             * Call the specified job function.
-             */
-            (void) func(arg);
-            /*
-             * If the job function calls pthread_exit(), the thread
-             * calls job_cleanup(pool) and worker_cleanup(pool);
-             * the integrity of the pool is thereby maintained.
-             */
-            pthread_cleanup_pop(1);    /* job_cleanup(pool) */
-        }
-        if (timedout && pool->pool_nthreads > pool->pool_minimum) {
-            /*
-             * We timed out and there is no work to be done
-             * and the number of workers exceeds the minimum.
-             * Exit now to reduce the size of the pool.
-             */
-            break;
-        }
-    }
-    pthread_cleanup_pop(1);    /* worker_cleanup(pool) */
-    return (NULL);
+       // release memory the job holds
+       free( njob );
+   }
+   return 0;
 }
 
-static void
-clone_attributes(pthread_attr_t *new_attr, pthread_attr_t *old_attr)
-{
-    struct sched_param param;
-    void *addr;
-    size_t size;
-    int value;
+lp_threadpool* lp_threadpool_init( int threads ){
+    lp_threadpool* pool = (lp_threadpool*)malloc( sizeof(lp_threadpool) );
+    pool->workers_ids = 1; // threads start from 1 to NTHREADS
+    pool->nthreads = threads;
+    pool->pending_jobs = 0;
+    pool->jobs_head=0;
+    pool->jobs_tail=0;
 
-    (void) pthread_attr_init(new_attr);
+    pthread_cond_init( &pool->cond_jobs, NULL );
+    pthread_mutex_init( &pool->mutex_pool, NULL );
 
-    if (old_attr != NULL) {
-        (void) pthread_attr_getstack(old_attr, &addr, &size);
-        /* don't allow a non-NULL thread stack address */
-        (void) pthread_attr_setstack(new_attr, NULL, size);
+    // lock pool in order to prevent worker threads to start before initializing the whole pool
+    pthread_mutex_lock( &pool->mutex_pool );
 
-        (void) pthread_attr_getscope(old_attr, &value);
-        (void) pthread_attr_setscope(new_attr, value);
-
-        (void) pthread_attr_getinheritsched(old_attr, &value);
-        (void) pthread_attr_setinheritsched(new_attr, value);
-
-        (void) pthread_attr_getschedpolicy(old_attr, &value);
-        (void) pthread_attr_setschedpolicy(new_attr, value);
-
-        (void) pthread_attr_getschedparam(old_attr, &param);
-        (void) pthread_attr_setschedparam(new_attr, &param);
-
-        (void) pthread_attr_getguardsize(old_attr, &size);
-        (void) pthread_attr_setguardsize(new_attr, size);
+    pthread_t *worker_threads = (pthread_t*)malloc(sizeof(pthread_t)*threads);
+    for( int i=0; i<threads; i++ ){
+        pthread_create( &worker_threads[i], NULL, reinterpret_cast<void* (*)(void*)>(lp_tpworker_thread), pool );
+        //fprintf( stderr, "[%p] thread[%d] started\n", worker_threads[i] );
     }
 
-    /* make all pool threads be detached threads */
-    (void) pthread_attr_setdetachstate(new_attr, PTHREAD_CREATE_DETACHED);
+    pool->worker_threads = worker_threads;
+
+    // unlock pool for workers
+    pthread_mutex_unlock( &pool->mutex_pool );
+
+    return pool;
 }
 
-thr_pool_t *
-thr_pool_create(unsigned int min_threads, unsigned int max_threads, unsigned int linger,
-    pthread_attr_t *attr)
-{
-    thr_pool_t    *pool;
-
-    (void) sigfillset(&fillset);
-
-    if (min_threads > max_threads || max_threads < 1) {
-        errno = EINVAL;
-        return (NULL);
-    }
-
-    if ((pool = (thr_pool_t*)malloc(sizeof (*pool))) == NULL) {
-        errno = ENOMEM;
-        return (NULL);
-    }
-    (void) pthread_mutex_init(&pool->pool_mutex, NULL);
-    (void) pthread_cond_init(&pool->pool_busycv, NULL);
-    (void) pthread_cond_init(&pool->pool_workcv, NULL);
-    (void) pthread_cond_init(&pool->pool_waitcv, NULL);
-    pool->pool_active = NULL;
-    pool->pool_head = NULL;
-    pool->pool_tail = NULL;
-    pool->pool_flags = 0;
-    pool->pool_linger = linger;
-    pool->pool_minimum = min_threads;
-    pool->pool_maximum = max_threads;
-    pool->pool_nthreads = 0;
-    pool->pool_idle = 0;
-
-    /*
-     * We cannot just copy the attribute pointer.
-     * We need to initialize a new pthread_attr_t structure using
-     * the values from the caller-supplied attribute structure.
-     * If the attribute pointer is NULL, we need to initialize
-     * the new pthread_attr_t structure with default values.
-     */
-    clone_attributes(&pool->pool_attr, attr);
-
-    /* insert into the global list of all thread pools */
-    (void) pthread_mutex_lock(&thr_pool_lock);
-    if (thr_pools == NULL) {
-        pool->pool_forw = pool;
-        pool->pool_back = pool;
-        thr_pools = pool;
-    } else {
-        thr_pools->pool_back->pool_forw = pool;
-        pool->pool_forw = thr_pools;
-        pool->pool_back = thr_pools->pool_back;
-        thr_pools->pool_back = pool;
-    }
-    (void) pthread_mutex_unlock(&thr_pool_lock);
-
-//    // INSTANTIATE THE MINIMUM THREAD WORKERS - Edited by Lambros Petrou
-//    for( int i=0; i<pool->pool_minimum; i++ ){
-//    	if( create_worker(pool) ){
-//    		perror( "Could not instantiate worker immediately" );
-//    	}
-//    	pool->pool_nthreads++;
-//    }
-
-    return (pool);
+void lp_threadpool_destroy(lp_threadpool* pool){
+     free( pool->worker_threads );
+     for( lp_tpjob* j=pool->jobs_head, *t=0; j; j=t ){
+         t = j->next;
+         free( j );
+     }
+     free( pool );
 }
 
-int
-thr_pool_queue(thr_pool_t *pool, void *(*func)(void *), void *arg)
-{
-    job_t *job;
 
-    if ((job = (job_t*)malloc(sizeof (*job))) == NULL) {
-        errno = ENOMEM;
-        return (-1);
+#define NTHREADS 24
+#define WORKERS NTHREADS+1
+
+sem_t sems[WORKERS];
+void* dummy( int tid, void* args ){
+    fprintf( stderr, "dummy execute by thread[%d]\n", tid );
+
+    // SYNCHRONIZE THREADS
+    if( tid < NTHREADS ){
+        sem_wait( &sems[tid+1] );
     }
-    job->job_next = NULL;
-    job->job_func = func;
-    job->job_arg = arg;
+    sem_post( &sems[tid] );
 
-    (void) pthread_mutex_lock(&pool->pool_mutex);
-
-    if (pool->pool_head == NULL)
-        pool->pool_head = job;
-    else
-        pool->pool_tail->job_next = job;
-    pool->pool_tail = job;
-
-    if (pool->pool_idle > 0)
-        (void) pthread_cond_signal(&pool->pool_workcv);
-    else if (pool->pool_nthreads < pool->pool_maximum &&
-        create_worker(pool) == 0)
-        pool->pool_nthreads++;
-
-    (void) pthread_mutex_unlock(&pool->pool_mutex);
-    return (0);
-}
-
-void
-thr_pool_wait(thr_pool_t *pool)
-{
-    (void) pthread_mutex_lock(&pool->pool_mutex);
-    pthread_cleanup_push(reinterpret_cast<void (*)(void*)>(pthread_mutex_unlock), &pool->pool_mutex);
-    while (pool->pool_head != NULL || pool->pool_active != NULL) {
-        pool->pool_flags |= POOL_WAIT;
-        (void) pthread_cond_wait(&pool->pool_waitcv, &pool->pool_mutex);
-    }
-    pthread_cleanup_pop(1);    /* pthread_mutex_unlock(&pool->pool_mutex); */
-}
-
-void
-thr_pool_destroy(thr_pool_t *pool)
-{
-    active_t *activep;
-    job_t *job;
-
-    (void) pthread_mutex_lock(&pool->pool_mutex);
-    pthread_cleanup_push(reinterpret_cast<void (*)(void*)>(pthread_mutex_unlock), &pool->pool_mutex);
-
-    /* mark the pool as being destroyed; wakeup idle workers */
-    pool->pool_flags |= POOL_DESTROY;
-    (void) pthread_cond_broadcast(&pool->pool_workcv);
-
-    /* cancel all active workers */
-    for (activep = pool->pool_active;
-        activep != NULL;
-        activep = activep->active_next)
-        (void) pthread_cancel(activep->active_tid);
-
-    /* wait for all active workers to finish */
-    while (pool->pool_active != NULL) {
-        pool->pool_flags |= POOL_WAIT;
-        (void) pthread_cond_wait(&pool->pool_waitcv, &pool->pool_mutex);
-    }
-
-    /* the last worker to terminate will wake us up */
-    while (pool->pool_nthreads != 0)
-        (void) pthread_cond_wait(&pool->pool_busycv, &pool->pool_mutex);
-
-    pthread_cleanup_pop(1);    /* pthread_mutex_unlock(&pool->pool_mutex); */
-
-    /*
-     * Unlink the pool from the global list of all pools.
-     */
-    (void) pthread_mutex_lock(&thr_pool_lock);
-    if (thr_pools == pool)
-        thr_pools = pool->pool_forw;
-    if (thr_pools == pool)
-        thr_pools = NULL;
-    else {
-        pool->pool_back->pool_forw = pool->pool_forw;
-        pool->pool_forw->pool_back = pool->pool_back;
-    }
-    (void) pthread_mutex_unlock(&thr_pool_lock);
-
-    /*
-     * There should be no pending jobs, but just in case...
-     */
-    for (job = pool->pool_head; job != NULL; job = pool->pool_head) {
-        pool->pool_head = job->job_next;
-        free(job);
-    }
-    (void) pthread_attr_destroy(&pool->pool_attr);
-    free(pool);
-}
-
-// dummy function to create all the threads
-void* dummy_thread_do(void* a){
-    return NULL;
+    fprintf( stderr, "dummy exit by thread[%d], signaled semaphore[%d]\n", tid, tid );
 }
 
 
@@ -570,7 +232,10 @@ void* dummy_thread_do(void* a){
 #define NO_LP_LOCKS_ENABLED
 //#define LP_LOCKS_ENABLED
 
-#define NUM_THREADS 16
+#define NUM_THREADS 18
+#define TOTAL_WORKERS NUM_THREADS+1
+#define LP_NUM_THREADS 32
+
 #define TRIES_EACH_TYPE 4
 #define TOTAL_SEARCHERS (2*TRIES_EACH_TYPE+1)
 
@@ -598,8 +263,8 @@ struct _ResultTrieSearch{
 	QueryArrayList *qids;
 };
 // both initialized in InitializeIndex()
-ResultTrieSearch global_results[NUM_THREADS+1];
-LockingMech global_results_locks[NUM_THREADS+1]; // one lock for each result set
+ResultTrieSearch global_results[LP_NUM_THREADS+1];
+LockingMech global_results_locks[LP_NUM_THREADS+1]; // one lock for each result set
 
 typedef struct _TrieNode TrieNode;
 struct _TrieNode{
@@ -930,9 +595,11 @@ QuerySet *querySet; // std::vector<QuerySetNode*>
 DocResults *docResults; // std::list<DocResultsNode>
 
 // THREADPOOL
-thr_pool_t* threadpool;
+lp_threadpool* threadpool;
 
 // STRUCTURES FOR PTHREADS
+
+
 
 #define WORDS_PROCESSED_BY_THREAD 150
 struct TrieSearchData{
@@ -942,21 +609,26 @@ struct TrieSearchData{
 	char padding[128];
 };
 
-
-
 unsigned int MAX_TRIE_SEARCH_DATA = 2048;
 unsigned int current_trie_search_data = 0;
 std::vector<TrieSearchData> trie_search_data_pool;
 
-void* TrieSearchWord( void* args ){
-	LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
-	TrieSearchData *tsd = (TrieSearchData *)lpargs->args;
+pthread_mutex_t mutex_tid = PTHREAD_MUTEX_INITIALIZER;
+void* TrieSearchWord( int tid, void* args ){
+	//LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
+	TrieSearchData *tsd = (TrieSearchData *)args;
 
 	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
 
 	const char* w;
 	char wsz;
-	char tid = lpargs->tid;
+
+	//char tid;
+//	pthread_mutex_lock( &mutex_tid );
+//	tid = (thread_ids++ % NUM_THREADS) +1;
+//	pthread_mutex_unlock( &mutex_tid );
+
+	//fprintf( stderr, "search[%d]\n", tid );
 
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
@@ -1012,9 +684,7 @@ struct LPMergesortResult{
 	unsigned int num_res;
 };
 
-
-
-TrieNodeLPMergesort *lp_mergesort_tries[NUM_THREADS+1];
+TrieNodeLPMergesort *lp_mergesort_tries[LP_NUM_THREADS];
 
 BinaryTreeNode* BinaryTree_Constructor(){
 	BinaryTreeNode* t = (BinaryTreeNode*)malloc(sizeof(BinaryTreeNode));
@@ -1139,6 +809,8 @@ void TrieLPMergesortInsert( TrieNodeLPMergesort* node, unsigned int qid, char po
 }
 
 void TrieLPMergesortFill( TrieNodeLPMergesort* root, QueryArrayList* qids ){
+	if( qids == (QueryArrayList *) 0xffffffffffffffff )
+		return;
 	for( unsigned int i=0, sz=qids->size(); i<sz; i++ ){
 		TrieLPMergesortInsert(root, qids->at(i).qid, qids->at(i).pos);
 	}
@@ -1228,42 +900,73 @@ LPMergesortResult* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
 	return res;
 }
 
-sem_t semaphores[NUM_THREADS+1];
-void* TrieLPMergesort( void* args ){
-	LP_ThreadArgs* lpargs = (LP_ThreadArgs*)args;
-	char tid = lpargs->tid;
 
-	pthread_mutex_lock( &lp_pthreads_mutex );
-	for (unsigned int i = 0; i < NUM_THREADS; i++) {
-		if (lp_pthreads[i] == pthread_self()) {
-			tid = i;
-			break;
-		}
-	}
-	pthread_mutex_unlock( &lp_pthreads_mutex );
+sem_t semaphores[LP_NUM_THREADS];
+
+// this function should be followed by sem_wait( semaphores[0] ) and it is assumed that the algorithm that uses it will have thread 0 as the last exit thread
+void synchronize_threads(int tid, void * a){
+
+	fprintf( stderr, "thread[%d] entered synchronization\n", tid );
+
+	// release the last thread
+	if( tid == 0 )
+	    sem_post( &semaphores[0] );
+
+	// blocking
+	if( tid < NUM_THREADS ) // avoid locking the last thread to a dummy thread
+	    sem_wait( &semaphores[ tid + 1 ] );
+	else
+		sem_wait( &semaphores[ 0 ] ); // the last thread should wait on itself
+	// release
+	if( tid > 0 ) // make the main thread to wait at the end
+	    sem_post( &semaphores[ tid ] );
+
+	fprintf( stderr, ":: thread[%d] exited synchronization\n", tid );
+}
+
+void synchronize_all_threads(){
+	for( int i=1; i<=NUM_THREADS; i++ ){
+	  	lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int,void*)>(synchronize_threads), (void*)NULL);
+    }
+	synchronize_threads(0, NULL);
+}
+
+void* TrieLPMergesort( int tid, void* args ){
+    fprintf( stderr, "thread[%d] entered sort\n", tid );
+
+    // SYNCHRONIZE THREADS
+    synchronize_threads( tid, NULL );
+
+    // END OF SYNCHRONIZATION
+
 
 	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[tid].qids );
 	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
 
-	fprintf( stderr, "phase[%d] tid[%d]\n", 0, tid );
-
-	sem_post( &semaphores[tid] );
-
-	int total_threads = NUM_THREADS+1;
-	int working_threads = total_threads>>1;
+	int working_threads = LP_NUM_THREADS>>1;
     int phase = 0;
 
-	while( tid >= total_threads-working_threads ){
-    	phase++;
-    	fprintf( stderr, "phase[%d] tid[%d]\n", phase, tid );
+	while( tid < working_threads ){
+		//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
 
-    	sem_wait( &semaphores[ tid-working_threads ] );
-    	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid-working_threads] );
-    	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
-    	sem_post( &semaphores[ tid ] );
+    	phase++;
+    	//fprintf( stderr, "phase[%d] tid[%d] sem_wait[%d]\n", phase, tid, tid+working_threads );
+
+    	// wait for the other active thread to finish
+    	if( tid + working_threads < NUM_THREADS ){
+			sem_wait( &semaphores[ tid + working_threads ] );
+    	}
+    	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid+working_threads] );
+    	//sem_getvalue(&semaphores[tid], &sem);
+    	//fprintf( stderr, "phase[%d] tid[%d] semaphore[%d]:[%d]\n", 0, tid, tid, sem );
+
     	working_threads >>= 1;
     }
 
+	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
+
+	// thread with id == 0 does not need to se_post since no one is waiting for him
+	sem_post( &semaphores[tid] );
 
 	return 0;
 }
@@ -1282,18 +985,8 @@ void* TrieLPMergesort( void* args ){
 
 ErrorCode InitializeIndex(){
 
-	for( char i=0; i<NUM_THREADS+1; i++ )
-	    sem_init( &semaphores[i], 0, 0 );
-
-	/*
-	cache_exact = new Cache();
-	cache_exact->resize(CACHE_SIZE);
-	for( int i=0; i<CACHE_SIZE; i++ ){
-		cache_exact->at(i).qids = 0;
-	    cache_exact->at(i).word[0] = '\0';
-		pthread_mutex_init(&cache_exact->at(i).mutex, NULL);
-	}
-	*/
+//	for( char i=0; i<LP_NUM_THREADS; i++ )
+//	    sem_init( &semaphores[i], 0, 0 );
 
 	trie_exact = TrieNode_Constructor();
     trie_hamming = (TrieNode**)malloc(sizeof(TrieNode*)*4);
@@ -1310,7 +1003,7 @@ ErrorCode InitializeIndex(){
 
     //global_results_locks = (LockingMech*)malloc(sizeof(LockingMech)*NUM_THREADS);
     //global_results = (ResultTrieSearch*)malloc( sizeof(ResultTrieSearch)*NUM_THREADS );
-    for( char i=0; i<NUM_THREADS+1; i++ ){
+    for( char i=0; i<LP_NUM_THREADS; i++ ){
     	global_results[i].qids = new QueryArrayList();
     	global_results[i].qids->resize(128);
     	global_results[i].qids->clear();
@@ -1323,20 +1016,9 @@ ErrorCode InitializeIndex(){
     querySet->push_back((QuerySetNode*)malloc(sizeof(QuerySetNode)));
     docResults = new DocResults();
 
-    // Initialize the threadpool with 12 threads
-    //threadpool = thpool_init( NUM_THREADS );
-    threadpool = thr_pool_create( NUM_THREADS, NUM_THREADS, 2, NULL );
+    // Initialize the threadpool
+    threadpool = lp_threadpool_init( NUM_THREADS );
 
-     //INSTANTIATE THE MINIMUM THREAD WORKERS - Edited by Lambros Petrou
-        for( int i=0; i<NUM_THREADS; i++ ){
-//        	pthread_mutex_lock(&threadpool->pool_mutex);
-//        	if( create_worker( threadpool ) ){
-//        		perror( "Could not instantiate worker immediately" );
-//        	}
-//        	threadpool->pool_nthreads++;
-//        	pthread_mutex_unlock(&threadpool->pool_mutex);
-        	thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(dummy_thread_do), NULL );
-        }
 
 	return EC_SUCCESS;
 }
@@ -1345,8 +1027,8 @@ ErrorCode InitializeIndex(){
 
 ErrorCode DestroyIndex(){
 
-	for( char i=0; i<NUM_THREADS+1; i++ )
-		sem_destroy( &semaphores[i] );
+//	for( char i=0; i<LP_NUM_THREADS; i++ )
+//		sem_destroy( &semaphores[i] );
 
 /*
 	for( int i=0; i<CACHE_SIZE; i++ )
@@ -1367,7 +1049,7 @@ ErrorCode DestroyIndex(){
     free( trie_edit );
 
     //free( global_results_locks );
-    for( char i=0; i<NUM_THREADS+1; i++ ){
+    for( char i=0; i<LP_NUM_THREADS; i++ ){
       	delete global_results[i].qids;
     }
     //free( global_results );
@@ -1379,7 +1061,7 @@ ErrorCode DestroyIndex(){
     delete docResults;
 
     // destroy the thread pool
-    thr_pool_destroy(threadpool);
+    //thr_pool_destroy(threadpool);
 
 	return EC_SUCCESS;
 }
@@ -1471,13 +1153,14 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	char k,szz;
 	// results are new for each document
 	// TODO - With this we might not need the global_results
-	for( k=0; k<NUM_THREADS+1; k++ ){
+	for( k=0; k<LP_NUM_THREADS; k++ ){
 		lp_mergesort_tries[k] = TrieNodeLPMergesort_Constructor();
 	}
 
 
-
 	TrieNodeVisited *visited = TrieNodeVisited_Constructor();
+
+
 
 
 	///////////////////////////////////////////////
@@ -1487,7 +1170,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	TrieSearchData *tsd = NULL;
 	const char *start, *end;
 	char sz;
-	char tid=NUM_THREADS;
+	int tid=0;
     for( start=doc_str; *start; start = end ){
 	    // FOR EACH WORD DO THE MATCHING
 
@@ -1515,7 +1198,8 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
     	if( batch_words == WORDS_PROCESSED_BY_THREAD ){
     		tsd->words_num = batch_words;
     		batch_words = 0;
-    		thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
+    		//thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieSearchWord), tsd );
+    		lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int, void*)>(TrieSearchWord), tsd );
     	}else if( *end == '\0' ){
     		// very few words or the last ones so just handle them yourself
     		// the same thing the THREAD_JOB does
@@ -1561,113 +1245,62 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         }
     }
 
+    // //////////////////////////
+    // FIND A WAY TO SYNCHRONIZE THREADPOOL
+    /////////////////////////////
+    //thr_pool_wait( threadpool );
+
+
+
+
+	for( char i=0; i<TOTAL_WORKERS; i++ )
+	    sem_init( &semaphores[i], 0, 0 );
+
+
+
+    //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
+
+        for( k=0; k<TOTAL_WORKERS; k++ ){
+        	TrieLPMergesortFill( lp_mergesort_tries[0] , global_results[k].qids );
+        }
+        TrieLPMergesortCheckQueries( lp_mergesort_tries[0] );
+
+
+//    for( batch_words=0; batch_words<NUM_THREADS; batch_words++ ){
+//    	lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int,void*)>(TrieLPMergesort), (void*)NULL);
+//    }
+//    TrieLPMergesort( 0, NULL );
+
+    // wait for the last thread to finish
+    //sem_wait( &semaphores[0] );
+
+
+        synchronize_all_threads();
+
+
+
+
+
+    for( char i=0; i<TOTAL_WORKERS; i++ )
+    	sem_destroy( &semaphores[i] );
 
     // destroy visited table
     TrieNodeVisited_Destructor( visited );
 
-    // //////////////////////////
-    // FIND A WAY TO SYNCHRONIZE THREADPOOL
-    /////////////////////////////
-    thr_pool_wait( threadpool );
-
-    //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
-
-    //    for( k=0; k<NUM_THREADS+1; k++ ){
-    //    	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[k].qids );
-    //    }
-    //    TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
-
-    LP_ThreadArgs *args;
-    for( batch_words=0; batch_words<NUM_THREADS; batch_words++ ){
-        args = (LP_ThreadArgs*)malloc( sizeof(LP_ThreadArgs) );
-        args->tid= batch_words;
-        args->args = NULL;
-    	thr_pool_queue( threadpool, reinterpret_cast<void* (*)(void*)>(TrieLPMergesort), args);
-    }
-
-//    args = (LP_ThreadArgs*)malloc( sizeof(LP_ThreadArgs) );
-//    args->args = NULL;
-//    args->tid = tid;
-//    TrieLPMergesort( &args );
-
-    thr_pool_wait( threadpool );
-    LPMergesortResult *res = TrieLPMergesortFlat( lp_mergesort_tries[tid] );
 
 
+     LPMergesortResult *res = TrieLPMergesortFlat( lp_mergesort_tries[0] );
 
-
-
-/*
-    // TODO - merge the results - CAN BE PARALLED
-    for( k=0, szz=NUM_THREADS; k<szz; k++ ){
-    	//fprintf( stderr, "total results[%d]: %d\n", k, results[k]->qids->size() );
-    	for( QueryArrayList::iterator it=global_results[k].qids->begin(), end=global_results[k].qids->end(); it != end; it++ ){
-    		global_results[NUM_THREADS].qids->push_back(*it);
-    	}
-    }
-
-    ResultTrieSearch *results_all;
-    results_all = &global_results[NUM_THREADS];
-
-
-    //int s = gettime();
-    // TODO - Parallel sorting
-    std::stable_sort( results_all->qids->begin(), results_all->qids->end(), compareQueryNodes );
-    //parallelMergesort( results->qids, results->qids->size(), 4 );
-    //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results_all->qids->size(), gettime()-s );
-
-    std::vector<QueryID> ids;
-    char counter=0;
-    QueryNode qn_p, qn_c;
-    // IF WE HAVE RESULTS FOR THIS DOCUMENT
-    if( ! results_all->qids->empty() ){
-        qn_p.qid = results_all->qids->begin()->qid;
-        qn_p.pos = results_all->qids->begin()->pos;
-        counter=1;
-
-		for( QueryArrayList::iterator it=++results_all->qids->begin(), end=results_all->qids->end(); it != end; it++ ){
-			qn_c = *it;
-			if( qn_p.qid == qn_c.qid ){
-				if( qn_p.pos == qn_c.pos ){
-					continue;
-				}else{
-					counter++;
-					qn_p.pos = qn_c.pos;
-				}
-			}else{
-				// we have finished checking a query
-				if( counter == querySet->at(qn_p.qid)->words_num ){
-					//fprintf( stderr, "\ncounter: %d %u[%d]\n", counter, qn_p.qid, querySet->at(qn_p.qid)->words_num );
-					ids.push_back(qn_p.qid);
-				}
-				counter = 1;
-				qn_p.pos = qn_c.pos;
-				qn_p.qid = qn_c.qid;
-			}
-		}
-
-    	// handle the last result because the for loop exited without inserting it
-    	if( counter == querySet->at(qn_p.qid)->words_num ){
-    	    ids.push_back(qn_p.qid);
-    	}
-    }
-*/
 
 	DocResultsNode doc;
 	doc.docid=doc_id;
 	doc.sz= res->num_res; //ids.size();
 	doc.qids = res->ids;
-	//doc.qids=0;
-	//if(doc.sz) doc.qids=(QueryID*)malloc(doc.sz*sizeof(unsigned int));
-	//for(int i=0, szz=doc.sz;i<szz;i++) doc.qids[i]=ids[i];
 	// Add this result to the set of undelivered results
 	docResults->push_back(doc);
 
-	for( k=0; k<NUM_THREADS+1; k++ ){
+	for( k=0; k<LP_NUM_THREADS; k++ ){
 		TrieNodeLPMergesort_Destructor( lp_mergesort_tries[k] );
-	}
-
-	for( k=0,szz=NUM_THREADS+1; k<szz; k++ ){
 		global_results[k].qids->clear();
 	}
 
