@@ -75,6 +75,8 @@ typedef struct{
 
    pthread_t *worker_threads;
 
+   sem_t *sem_sync;
+
 }lp_threadpool;
 
 void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void* args ){
@@ -152,7 +154,6 @@ void* lp_tpworker_thread( void* _pool ){
 
    lp_threadpool* pool = ((lp_threadpool*)_pool);
    int _tid=lp_threadpool_uniquetid( pool );
-   int i;
 
    //fprintf( stderr, "thread[%d] entered worker_thread infite\n", _tid );
 
@@ -192,6 +193,11 @@ lp_threadpool* lp_threadpool_init( int threads ){
 
     pool->worker_threads = worker_threads;
 
+    pool->sem_sync = (sem_t*)malloc( sizeof(sem_t) * pool->nthreads );
+    for( int i=0; i<pool->nthreads; i++ ){
+    	sem_init( &(pool->sem_sync[i]), 0 ,0 );
+    }
+
     // unlock pool for workers
     pthread_mutex_unlock( &pool->mutex_pool );
 
@@ -199,31 +205,44 @@ lp_threadpool* lp_threadpool_init( int threads ){
 }
 
 void lp_threadpool_destroy(lp_threadpool* pool){
-     free( pool->worker_threads );
-     for( lp_tpjob* j=pool->jobs_head, *t=0; j; j=t ){
-         t = j->next;
-         free( j );
-     }
-     free( pool );
+
+	for (int i = 0; i < pool->nthreads; i++) {
+		sem_destroy(&(pool->sem_sync[i]));
+	}
+	free(pool->sem_sync);
+
+	free(pool->worker_threads);
+	for (lp_tpjob* j = pool->jobs_head, *t = 0; j; j = t) {
+		t = j->next;
+		free(j);
+	}
+	free(pool);
 }
 
+// this function should be followed by sem_wait( semaphores[0] ) and it is assumed that the algorithm that uses it will have thread 0 as the last exit thread
+void synchronize_threads(int tid, void * arg){
+    lp_threadpool* pool = (lp_threadpool*)arg;
 
-#define NTHREADS 24
-#define WORKERS NTHREADS+1
+	fprintf( stderr, "thread[%d] entered synchronization\n", tid );
 
-sem_t sems[WORKERS];
-void* dummy( int tid, void* args ){
-    fprintf( stderr, "dummy execute by thread[%d]\n", tid );
+	// thread NTHREAD will release the threads
+	if( tid < pool->nthreads )
+	    sem_wait( &(pool->sem_sync[ tid + 1 ]) );
+    sem_post( &(pool->sem_sync[ tid ]) );
 
-    // SYNCHRONIZE THREADS
-    if( tid < NTHREADS ){
-        sem_wait( &sems[tid+1] );
+    // thread 1 will release the threads
+    if( tid > 1 )
+    	sem_wait( &(pool->sem_sync[ tid - 1 ]) );
+    sem_post( &(pool->sem_sync[ tid ]) );
+
+	fprintf( stderr, ":: thread[%d] exited synchronization\n", tid );
+}
+
+void lp_threadpool_synchronize_all(lp_threadpool* pool){
+	for( int i=1; i<=pool->nthreads; i++ ){
+	  	lp_threadpool_addjob( pool, reinterpret_cast<void* (*)(int,void*)>(synchronize_threads), (void*)pool);
     }
-    sem_post( &sems[tid] );
-
-    fprintf( stderr, "dummy exit by thread[%d], signaled semaphore[%d]\n", tid, tid );
 }
-
 
 /********************************************************************************************
  *  THREADPOOL STRUCTURE END
@@ -900,45 +919,11 @@ LPMergesortResult* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
 	return res;
 }
 
-
-sem_t semaphores[LP_NUM_THREADS];
-
-// this function should be followed by sem_wait( semaphores[0] ) and it is assumed that the algorithm that uses it will have thread 0 as the last exit thread
-void synchronize_threads(int tid, void * a){
-
-	fprintf( stderr, "thread[%d] entered synchronization\n", tid );
-
-	// release the last thread
-	if( tid == 0 )
-	    sem_post( &semaphores[0] );
-
-	// blocking
-	if( tid < NUM_THREADS ) // avoid locking the last thread to a dummy thread
-	    sem_wait( &semaphores[ tid + 1 ] );
-	else
-		sem_wait( &semaphores[ 0 ] ); // the last thread should wait on itself
-	// release
-	if( tid > 0 ) // make the main thread to wait at the end
-	    sem_post( &semaphores[ tid ] );
-
-	fprintf( stderr, ":: thread[%d] exited synchronization\n", tid );
-}
-
-void synchronize_all_threads(){
-	for( int i=1; i<=NUM_THREADS; i++ ){
-	  	lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int,void*)>(synchronize_threads), (void*)NULL);
-    }
-	synchronize_threads(0, NULL);
-}
-
 void* TrieLPMergesort( int tid, void* args ){
+
+	lp_threadpool* pool = (lp_threadpool*)args;
+
     fprintf( stderr, "thread[%d] entered sort\n", tid );
-
-    // SYNCHRONIZE THREADS
-    synchronize_threads( tid, NULL );
-
-    // END OF SYNCHRONIZATION
-
 
 	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[tid].qids );
 	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
@@ -950,15 +935,12 @@ void* TrieLPMergesort( int tid, void* args ){
 		//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
 
     	phase++;
-    	//fprintf( stderr, "phase[%d] tid[%d] sem_wait[%d]\n", phase, tid, tid+working_threads );
 
     	// wait for the other active thread to finish
     	if( tid + working_threads < NUM_THREADS ){
-			sem_wait( &semaphores[ tid + working_threads ] );
+			sem_wait( &(pool->sem_sync[ tid + working_threads ]) );
     	}
     	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid+working_threads] );
-    	//sem_getvalue(&semaphores[tid], &sem);
-    	//fprintf( stderr, "phase[%d] tid[%d] semaphore[%d]:[%d]\n", 0, tid, tid, sem );
 
     	working_threads >>= 1;
     }
@@ -966,7 +948,7 @@ void* TrieLPMergesort( int tid, void* args ){
 	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
 
 	// thread with id == 0 does not need to se_post since no one is waiting for him
-	sem_post( &semaphores[tid] );
+	sem_post( &pool->sem_sync[tid] );
 
 	return 0;
 }
@@ -1255,11 +1237,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
 
 
-
-	for( char i=0; i<TOTAL_WORKERS; i++ )
-	    sem_init( &semaphores[i], 0, 0 );
-
-synchronize_all_threads();
+    lp_threadpool_synchronize_all( threadpool );
 
     //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
@@ -1280,10 +1258,6 @@ synchronize_all_threads();
 
 
 
-
-
-    for( char i=0; i<TOTAL_WORKERS; i++ )
-    	sem_destroy( &semaphores[i] );
 
     // destroy visited table
     TrieNodeVisited_Destructor( visited );
