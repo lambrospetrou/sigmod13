@@ -846,7 +846,7 @@ void TrieLPMergesortCheckQueries( TrieNodeLPMergesort* root ){
 	while( !stack.empty() ){
 		c = stack.back();
 		stack.pop_back();
-		// check the current node if it's a valid
+		// check the current node if it's a valid query id
 		if( c->valid ){
 			// we must check that the query satisfies constraints
 			if( c->entries == querySet->at( c->qid )->words_num ){
@@ -878,8 +878,9 @@ void TrieLPMergesortMerge( TrieNodeLPMergesort* root, TrieNodeLPMergesort* other
 		stack.pop_back();
 		// check the current node if it's a valid
 		if( c->valid ){
-			for( char i=0; i<c->entries; i++ )
-			    TrieLPMergesortInsert( root, c->qid, c->pos[i] );
+			for( i=0; i<5; i++ )
+				if( c->pos[i] == 1 )
+			        TrieLPMergesortInsert( root, c->qid, i );
 		}
 		// add the children for this node
 		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
@@ -921,13 +922,11 @@ LPMergesortResult* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
 
 // not working as is
 void* TrieLPMergesort( int tid, void* args ){
+    pthread_barrier_t *barriers = (pthread_barrier_t*)args;
 
-	lp_threadpool* pool = (lp_threadpool*)args;
-
-    fprintf( stderr, "thread[%d] entered sort\n", tid );
+///fprintf( stderr, "thread[%d] entered sort\n", tid );
 
 	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[tid].qids );
-	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
 
 	int working_threads = LP_NUM_THREADS>>1;
     int phase = 0;
@@ -938,18 +937,33 @@ void* TrieLPMergesort( int tid, void* args ){
     	phase++;
 
     	// wait for the other active thread to finish
-    	if( tid + working_threads < NUM_THREADS ){
-			//sem_wait( &(pool->sem_sync[ tid + working_threads ]) );
+    	if( tid + working_threads <= NUM_THREADS ){
+    		//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
+    		//fprintf( stderr, "thread[%d] barred at [%d]\n", tid, tid+working_threads );
+            pthread_barrier_wait( &barriers[tid+working_threads] );
     	}
     	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid+working_threads] );
 
     	working_threads >>= 1;
     }
 
-	TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
 
-	// thread with id == 0 does not need to se_post since no one is waiting for him
-	//sem_post( &pool->sem_sync[tid] );
+
+	// to release the thread waiting for you
+	/*if( tid > 0 ){
+		fprintf( stderr, "thread[%d] barred at [%d]\n", tid, tid );
+		pthread_barrier_wait( &barriers[tid] );
+	}
+	// everybody will wait thread 0 to finish*/
+	if( tid > 0 ){
+		//fprintf( stderr, "thread[%d] barred at 0\n", tid );
+		pthread_barrier_wait( &barriers[tid] );
+	}else if ( tid == 0 ){
+		TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
+	}
+	//fprintf( stderr, "thread[%d] finished\n", tid );
+	pthread_barrier_wait( &barriers[0] );
+
 
 	return 0;
 }
@@ -964,7 +978,7 @@ void* TrieLPMergesort( int tid, void* args ){
  *  PARALLEL ALGORITHMS
  */
 struct mergesort_p{
-	pthread_cond_t finished;
+	sem_t finished;
 	pthread_cond_t* conds;
 	pthread_mutex_t* mutexes;
 	int *ready;
@@ -982,15 +996,15 @@ void lp_mergesort_parallel( int tid, void* args ){
 	    std::stable_sort( global_results[tid].qids->begin(), global_results[tid].qids->end(), compareQueryNodes );
 
 		while( tid < working_threads ){
-			//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
+			phase++;
+			//fprintf( stderr, "phase[%d] tid[%d] working threads[%d]\n", phase, tid, working_threads );
 
-	    	phase++;
 
 	    	// wait for the other active thread to finish
-	    	if( tid + working_threads < NUM_THREADS ){
+	    	if( tid + working_threads <= NUM_THREADS ){
 				pthread_mutex_lock( &msp->mutexes[tid+working_threads] );
 				if( msp->ready[tid + working_threads] == 0 )
-					pthread_cond_wait( &msp->conds[tid+working_threads], &msp->mutexes[tid] );
+					pthread_cond_wait( &msp->conds[tid+working_threads], &msp->mutexes[tid+working_threads] );
 				pthread_mutex_unlock( &msp->mutexes[tid+working_threads] );
 	    	}
 
@@ -998,36 +1012,44 @@ void lp_mergesort_parallel( int tid, void* args ){
             std::vector<QueryNode> temp = *(global_results[tid].qids);
             std::vector<QueryNode> *other = global_results[tid+working_threads].qids;
             std::vector<QueryNode> *qids = global_results[tid].qids;
-            int i,j,isz,jsz,k=0;
+            int i,j,isz,jsz;
             isz=temp.size();
-            jsz=qids->size();
+            jsz=other->size();
             qids->clear();
-            for( i=0,j=0; i<isz && i<jsz;  ){
+            for( i=0,j=0; i<isz && j<jsz;  ){
             	if( compareQueryNodes( temp.at(i), other->at(j) ) ){
                     qids->push_back(temp[i++]);
             	}else{
-            		qids->push_back(other->at(i++));
+            		qids->push_back(other->at(j++));
             	}
             }
             for( ; i<isz; i++ )
             	qids->push_back(temp[i++]);
             for( ; j<jsz; j++ )
-            	qids->push_back(other->at(i++));
+            	qids->push_back(other->at(j++));
 
 
 	    	working_threads >>= 1;
 	    }
 
-		pthread_mutex_lock( &msp->mutexes[tid] );
-		msp->ready[tid] = 1;
-		pthread_cond_signal(&msp->conds[tid]);
-		if( tid > 0 )
-		    pthread_cond_wait( &msp->finished, &msp->mutexes[tid] );
-		pthread_mutex_unlock( &msp->mutexes[tid] );
-
 		if( tid == 0 ){
-			pthread_cond_broadcast(&msp->finished);
+			for( int i=0; i<LP_NUM_THREADS; i++ ){
+				sem_post( &msp->finished );
+			}
+		}else{
+			pthread_mutex_lock(&msp->mutexes[tid]);
+			msp->ready[tid] = 1;
+			pthread_cond_signal(&msp->conds[tid]);
+			pthread_mutex_unlock(&msp->mutexes[tid]);
+			fprintf( stderr, "thread[%d] waited on semaphore\n", tid );
+			sem_wait( &msp->finished );
 		}
+
+
+
+
+
+		//fprintf( stderr, "thread[%d] exited sort\n", tid );
 
 		return;
 }
@@ -1202,9 +1224,9 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
 	// results are new for each document
 	// TODO - With this we might not need the global_results
-	//for( k=0; k<LP_NUM_THREADS; k++ ){
-		//lp_mergesort_tries[k] = TrieNodeLPMergesort_Constructor();
-	//}
+	for( k=0; k<LP_NUM_THREADS; k++ ){
+		lp_mergesort_tries[k] = TrieNodeLPMergesort_Constructor();
+	}
 
 
 	TrieNodeVisited *visited = TrieNodeVisited_Constructor();
@@ -1306,8 +1328,46 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
         //int s = gettime();
 
+//        for( k=0; k<TOTAL_WORKERS; k++ ){
+//                    TrieLPMergesortFill( lp_mergesort_tries[k] , global_results[k].qids );
+//               }
+//        //for( k=1; k<TOTAL_WORKERS; k++ )
+//          //      	TrieLPMergesortCheckQueries( lp_mergesort_tries[k] );
+//        for( k=1; k<TOTAL_WORKERS; k++ )
+//        	TrieLPMergesortMerge( lp_mergesort_tries[0], lp_mergesort_tries[k] );
+//        TrieLPMergesortCheckQueries( lp_mergesort_tries[0] );
 
 
+//        for( k=0; k<TOTAL_WORKERS; k++ ){
+//             TrieLPMergesortFill( lp_mergesort_tries[0] , global_results[k].qids );
+//        }
+//        TrieLPMergesortCheckQueries( lp_mergesort_tries[0] );
+
+
+	pthread_barrier_t *bars = (pthread_barrier_t*) malloc(sizeof(pthread_barrier_t)*LP_NUM_THREADS);
+	for (int g = 1; g < LP_NUM_THREADS; g++)
+		pthread_barrier_init(&bars[g], NULL, 2);
+	pthread_barrier_init(&bars[0], NULL, TOTAL_WORKERS);
+
+	for (batch_words = 0; batch_words < NUM_THREADS; batch_words++) {
+		lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(TrieLPMergesort), (void*)bars);
+	}
+	TrieLPMergesort(0, (void*)bars);
+
+	for (int g = 0; g < LP_NUM_THREADS; g++)
+			pthread_barrier_destroy(&bars[g]);
+	free(bars);
+
+
+        LPMergesortResult *res = TrieLPMergesortFlat( lp_mergesort_tries[0] );
+		DocResultsNode doc;
+		doc.docid=doc_id;
+		doc.sz= res->num_res; //ids.size();
+		doc.qids = res->ids;
+		// Add this result to the set of undelivered results
+		docResults->push_back(doc);
+
+/*
         mergesort_p msp;
         pthread_cond_t sorting_conds[LP_NUM_THREADS];;
         pthread_mutex_t sorting_mutexes[LP_NUM_THREADS];
@@ -1317,16 +1377,17 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
             sorting_mutexes[k] = PTHREAD_MUTEX_INITIALIZER;
             sorting_ready[k] = 0;
         }
-        pthread_cond_init( &msp.finished, NULL );
+        sem_init( &msp.finished, 0, 0 );
         msp.conds = sorting_conds;
         msp.mutexes = sorting_mutexes;
         msp.ready = sorting_ready;
 
-
             for( batch_words=0; batch_words<NUM_THREADS; batch_words++ ){
             	lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int,void*)>(lp_mergesort_parallel), (void*)&msp);
             }
-            TrieLPMergesort( 0, &msp );
+            lp_mergesort_parallel( 0, &msp );
+*/
+
 
 /*
 
@@ -1345,13 +1406,16 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         std::stable_sort( results_all->qids->begin(), results_all->qids->end(), compareQueryNodes );
         //parallelMergesort( results->qids, results->qids->size(), 4 );
 */
+
         //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results_all->qids->size(), gettime()-s );
 
-        ResultTrieSearch *results_all;
-	    results_all = &global_results[0];
+
 
 
         // FIND THE UNIQUE IDS AND CHECK IF THE QueryIDS are valid as per their words
+/*
+        ResultTrieSearch *results_all;
+	    results_all = &global_results[0];
 
         char counter=0;
         QueryNode qn_p, qn_c;
@@ -1401,9 +1465,9 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
 
 
-
+*/
 	for( k=0; k<LP_NUM_THREADS; k++ ){
-		//TrieNodeLPMergesort_Destructor( lp_mergesort_tries[k] );
+		TrieNodeLPMergesort_Destructor( lp_mergesort_tries[k] );
 		global_results[k].qids->clear();
 	}
 
