@@ -76,8 +76,10 @@ typedef struct{
    pthread_t *worker_threads;
 
    int synced_threads;
-   pthread_cond_t pool_sync;
+   pthread_cond_t sleep;
    pthread_barrier_t pool_barrier;
+
+
 
 }lp_threadpool;
 
@@ -122,8 +124,18 @@ lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool ){
     // lock pool
     pthread_mutex_lock( &pool->mutex_pool );
 
-       while( pool->pending_jobs == 0 )
+       while( pool->pending_jobs == 0 ){
+    	   pool->synced_threads++;
+    	   //fprintf( stderr, "fecth_job: synced_threads[%d]\n", pool->synced_threads );
+    	   if( pool->synced_threads == pool->nthreads ){
+    		   // signal anyone waiting for complete synchronization
+    		   pthread_cond_broadcast(&pool->sleep);
+    	   }
            pthread_cond_wait( &pool->cond_jobs, &pool->mutex_pool );
+           pool->synced_threads--;
+       }
+
+
 
        // available job pending
         --pool->pending_jobs;
@@ -182,6 +194,9 @@ lp_threadpool* lp_threadpool_init( int threads ){
     pool->jobs_tail=0;
 
     pthread_cond_init( &pool->cond_jobs, NULL );
+    pthread_cond_init( &pool->sleep, NULL );
+    pool->synced_threads = 0;
+
     pthread_mutex_init( &pool->mutex_pool, NULL );
 
     // lock pool in order to prevent worker threads to start before initializing the whole pool
@@ -195,9 +210,6 @@ lp_threadpool* lp_threadpool_init( int threads ){
 
     pool->worker_threads = worker_threads;
 
-    pthread_cond_init( &pool->pool_sync, NULL );
-    pool->synced_threads = 0;
-
     pthread_barrier_init( &pool->pool_barrier, NULL, 25 );
 
     // unlock pool for workers
@@ -207,9 +219,8 @@ lp_threadpool* lp_threadpool_init( int threads ){
 }
 
 void lp_threadpool_destroy(lp_threadpool* pool){
-
+	pthread_cond_destroy( &pool->sleep );
     pthread_cond_destroy( &pool->cond_jobs );
-    pthread_cond_destroy( &pool->pool_sync );
 	free(pool->worker_threads);
 	for (lp_tpjob* j = pool->jobs_head, *t = 0; j; j = t) {
 		t = j->next;
@@ -218,31 +229,6 @@ void lp_threadpool_destroy(lp_threadpool* pool){
 	free(pool);
 }
 
-
-void synchronize_threads(int tid, void * arg){
-    lp_threadpool* pool = (lp_threadpool*)arg;
-
-	fprintf( stderr, "thread[%d] entered synchronization\n", tid );
-
-	pthread_mutex_lock( &pool->mutex_pool );
-
-	++pool->synced_threads;
-	if( pool->synced_threads == pool->nthreads ){
-		pool->synced_threads = 0;
-		pthread_cond_broadcast( &pool->pool_sync );
-	}else{
-		pthread_cond_wait( &pool->pool_sync, &pool->mutex_pool );
-	}
-
-	pthread_mutex_unlock( &pool->mutex_pool );
-
-	fprintf( stderr, ":: thread[%d] exited synchronization\n", tid );
-}
-void lp_threadpool_synchronize_all(lp_threadpool* pool){
-	for( int i=1; i<=pool->nthreads; i++ ){
-	  	lp_threadpool_addjob( pool, reinterpret_cast<void* (*)(int,void*)>(synchronize_threads), (void*)pool);
-    }
-}
 
 //void synchronize_threads_master(int tid, void * arg){
 //    lp_threadpool* pool = (lp_threadpool*)arg;
@@ -278,6 +264,18 @@ void lp_threadpool_synchronize_master(lp_threadpool* pool){
 	synchronize_threads_master(0, (void*)pool);
 }
 
+void synchronize_complete(lp_threadpool* pool){
+
+	pthread_mutex_lock( &pool->mutex_pool );
+
+	while( pool->synced_threads < pool->nthreads ){
+        pthread_cond_wait( &pool->sleep, &pool->mutex_pool );
+        //fprintf( stderr, "sunchronize_complete: synced_threads[%d]\n", pool->synced_threads );
+	}
+
+    pthread_mutex_unlock( &pool->mutex_pool );
+}
+
 /********************************************************************************************
  *  THREADPOOL STRUCTURE END
  ********************************************************************************************/
@@ -306,23 +304,13 @@ struct _QueryNode{
 
 typedef std::vector<QueryNode> QueryArrayList;
 
-bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
-	if( a.qid < b.qid  )
-		return true;
-	if( a.qid > b.qid )
-		return false;
-	return a.pos <= b.pos;
-}
-
 typedef struct _ResultTrieSearch ResultTrieSearch;
 struct _ResultTrieSearch{
 	char padding[128];
 	QueryArrayList *qids;
 };
 // both initialized in InitializeIndex()
-ResultTrieSearch global_results[LP_NUM_THREADS+1];
-
-char doc_results[DOC_RESULTS_SIZE];
+//ResultTrieSearch global_results[LP_NUM_THREADS+1];
 
 
 typedef struct _TrieNode TrieNode;
@@ -376,7 +364,7 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
 // above are the same regardless of query type
 ////////////////////////////////////////////////
 
-void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, ResultTrieSearch* local_results ){
+void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, /*ResultTrieSearch* local_results*/char* doc_results ){
 	//fprintf( stderr, "[1] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, root, word_sz, word, 0, results );
 
    char p, i, found=1;
@@ -404,7 +392,7 @@ struct HammingNode{
 	char depth;
 	char tcost;
 };
-void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, ResultTrieSearch* local_results, char maxCost ){
+void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*ResultTrieSearch* local_results*/char* doc_results, char maxCost ){
 	//fprintf( stderr, "[2] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
 	HammingNode current, n;
@@ -456,7 +444,7 @@ struct EditNode{
 	char previous[MAX_WORD_LENGTH+1];
 	char letter;
 };
-void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, ResultTrieSearch* local_results, char maxCost ){
+void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*ResultTrieSearch* local_results*/char* doc_results, char maxCost ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
     EditNode c, n;
@@ -600,42 +588,65 @@ struct DocResultsNode{
 };
 typedef std::vector<DocResultsNode> DocResults;
 
-
-/********************************************************************************************
- *   STRUCTURE END
- ********************************************************************************************/
-/********************************************************************************************
- *  CACHE STRUCTURES
- *************************************/
-unsigned int tcl_hash( const void *v, char sz ){
-	const char* string = (char*)v;
-	unsigned int result = 0;
-	int c;
-	while ( sz-- > 0 ) {
-		c = *string++;
-		result += (result<<3) + c;
-	}
-	return result;
-}
-struct CacheEntry{
-	pthread_mutex_t mutex;
-	char word[MAX_WORD_LENGTH+1];
-	QueryID *qids;
+// STRUCTURES FOR PTHREADS
+#define WORDS_PROCESSED_BY_THREAD 400
+struct TrieSearchData{
+	const char* words[WORDS_PROCESSED_BY_THREAD];
+	char words_sz[WORDS_PROCESSED_BY_THREAD];
+	short words_num;
+	char padding[128];
+	DocID doc_id;
 };
-typedef std::vector<CacheEntry> Cache;
-#define CACHE_SIZE 100000
-#define VISITED_SIZE 2*CACHE_SIZE
 
-/********************************************************************************************
- *  CACHE STRUCTURES END
- ********************************************************************************************/
+#define MAX_TRIE_SEARCH_DATA 10
 
+struct Document{
+	char *doc; // might be faster if not fixed size
+	DocID doc_id;
+	int total_jobs;
+	int finished_jobs;
+	char *qids; // initialized to num of queries * 5 or 8
+	TrieNodeVisited *visited; // only the matching job
+	pthread_mutex_t mutex_finished_jobs;
+	//TrieSearchData trie_search_data_pool[MAX_TRIE_SEARCH_DATA];
+	//unsigned int current_trie_search_data;
+};
+
+Document* DocumentConstructor(){
+    Document* doc = (Document*)malloc(sizeof(Document));
+    doc->doc=(char*)malloc( MAX_DOC_LENGTH );
+    doc->doc_id=0;
+    doc->finished_jobs = 0;
+    doc->total_jobs = MAX_DOC_LENGTH;
+    doc->qids = (char*)malloc( DOC_RESULTS_SIZE );
+    memset(doc->qids, 0, DOC_RESULTS_SIZE);
+    doc->visited = TrieNodeVisited_Constructor();
+    pthread_mutex_init( &doc->mutex_finished_jobs, NULL );
+    //doc->current_trie_search_data = 0;
+    return doc;
+}
+
+void DocumentDestructor( Document *doc ){
+	free( doc->doc );
+	free( doc->qids );
+	TrieNodeVisited_Destructor( doc->visited );
+	free( doc );
+}
+
+struct DocumentHandlerNode{
+	DocID doc_id;
+	//char *str;
+};
 
 /********************************************************************************************
  *  GLOBALS
  *************************************/
 
-Cache *cache_exact;
+int lastMethodCalled = -1; // 1=StartQuery, 2=EndQuery, 3=MatchDocument, 4=InitializeIndex, 5=DestroyIndex
+std::vector<Document*> documents;
+
+pthread_mutex_t mutex_doc_results = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond_doc_results = PTHREAD_COND_INITIALIZER;
 
 TrieNode *trie_exact;
 TrieNode **trie_hamming;
@@ -647,46 +658,174 @@ DocResults *docResults; // std::list<DocResultsNode>
 // THREADPOOL
 lp_threadpool* threadpool;
 
-// STRUCTURES FOR PTHREADS
-#define WORDS_PROCESSED_BY_THREAD 50
-struct TrieSearchData{
-	const char* words[WORDS_PROCESSED_BY_THREAD];
-	char words_sz[WORDS_PROCESSED_BY_THREAD];
-	short words_num;
-	char padding[128];
-};
 
-unsigned int MAX_TRIE_SEARCH_DATA = MAX_DOC_LENGTH / 2;
-unsigned int current_trie_search_data = 0;
-std::vector<TrieSearchData> trie_search_data_pool;
+// it is assumed that this document finished processing
+void* FinishingJob( int tid, void* args ){
+    //DocID *doc_id = (DocID*)args;
+	DocumentHandlerNode* doch = ((DocumentHandlerNode*)args);
 
-pthread_mutex_t mutex_tid = PTHREAD_MUTEX_INITIALIZER;
-void* TrieSearchWord( int tid, void* args ){
-	TrieSearchData *tsd = (TrieSearchData *)args;
+    //fprintf( stderr, "Finishing[%u]\n", doch->doc_id );
 
-	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
+    Document* doc = documents[doch->doc_id];
+    char *doc_results = doc->qids;
 
-	const char* w;
-	char wsz;
+    int total_results=0;
+            unsigned int nids = querySet->size();
+            unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
+            memset( final_ids, 0, sizeof(unsigned int)*nids );
+            for( unsigned int i=0; i<DOC_RESULTS_SIZE; i++ ){
+            	//fprintf( stderr, "\n%d ", i );
+            	if( doc_results[i] == 1 ){
+            		doc_results[i] = 0;
+                    ++final_ids[i/5];
+            	}
+            }
+            for( unsigned int i=1; i<nids; i++ ){
+            	if( final_ids[ i ] == querySet->at(i)->words_num ){
+            		final_ids[total_results++] = i;
+            	}
+            }
 
-	//fprintf( stderr, "search[%d]\n", tid );
+            //DocumentDestructor(doc);
 
-	for( int i=0, j=tsd->words_num; i<j; i++ ){
-		wsz = tsd->words_sz[i];
-		w = tsd->words[i];
-		TrieExactSearchWord(  tid, trie_exact, w, wsz, &global_results[tid] );
-		TrieHammingSearchWord( tid, trie_hamming[0], w, wsz, &global_results[tid], 0 );
-	    TrieHammingSearchWord( tid, trie_hamming[1], w, wsz, &global_results[tid], 1 );
-		TrieHammingSearchWord( tid, trie_hamming[2], w, wsz, &global_results[tid], 2 );
-		TrieHammingSearchWord( tid, trie_hamming[3], w, wsz, &global_results[tid], 3 );
-		TrieEditSearchWord( tid, trie_edit[0], w, wsz, &global_results[tid], 0 );
-		TrieEditSearchWord( tid, trie_edit[1], w, wsz, &global_results[tid], 1 );
-		TrieEditSearchWord( tid, trie_edit[2], w, wsz, &global_results[tid], 2 );
-		TrieEditSearchWord( tid, trie_edit[3], w, wsz, &global_results[tid], 3 );
-	}
+            DocResultsNode docr;
+            docr.docid=doch->doc_id;
+            docr.sz=total_results;
+            docr.qids=final_ids;
+
+            pthread_mutex_lock( &mutex_doc_results );
+            docResults->push_back(docr);
+            //fprintf( stderr, "finished doc[%d] doc[%d]\n", docr.docid, docResults->back().docid );
+            pthread_mutex_unlock( &mutex_doc_results );
+            pthread_cond_signal( &cond_doc_results );
+
+
+            //free( doc_id );
 
 	return 0;
 }
+
+void* TrieSearchWord( int tid, void* args ){
+	TrieSearchData *tsd = (TrieSearchData *)args;
+	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
+	const char* w;
+	char wsz;
+	Document *doc = documents[tsd->doc_id];
+
+
+	char *dres = doc->qids;
+	for( int i=0, j=tsd->words_num; i<j; i++ ){
+		wsz = tsd->words_sz[i];
+		w = tsd->words[i];
+		TrieExactSearchWord(  tid, trie_exact, w, wsz, dres );
+		TrieHammingSearchWord( tid, trie_hamming[0], w, wsz, dres, 0 );
+		TrieHammingSearchWord( tid, trie_hamming[1], w, wsz, dres, 1 );
+		TrieHammingSearchWord( tid, trie_hamming[2], w, wsz, dres, 2 );
+		TrieHammingSearchWord( tid, trie_hamming[3], w, wsz, dres, 3 );
+		TrieEditSearchWord( tid, trie_edit[0], w, wsz, dres, 0 );
+		TrieEditSearchWord( tid, trie_edit[1], w, wsz, dres, 1 );
+		TrieEditSearchWord( tid, trie_edit[2], w, wsz, dres, 2 );
+		TrieEditSearchWord( tid, trie_edit[3], w, wsz, dres, 3 );
+	}
+
+	// check if all jobs are finished
+	pthread_mutex_lock( &doc->mutex_finished_jobs );
+	    doc->finished_jobs = doc->finished_jobs + 1;
+		if( doc->total_jobs == doc->finished_jobs ){
+			doc->total_jobs = -1;
+			//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
+			lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
+		}
+	pthread_mutex_unlock( &doc->mutex_finished_jobs );
+
+	free( tsd );
+
+	return 0;
+}
+
+
+
+void* DocumentHandler( int tid, void* args ){
+	DocumentHandlerNode* doch = ((DocumentHandlerNode*)args);
+    Document *document = documents[doch->doc_id];
+
+
+//    fprintf( stderr, "handling doc[%d] [%d]\n", doch->doc_id, documents[doch->doc_id]->doc_id );
+
+    unsigned int total_jobs = 0;
+	unsigned int batch_words=0;
+	    //int total_words=0;
+		TrieSearchData *tsd = NULL;
+		const char *start, *end;
+		char sz;
+	    for( start=document->doc; *start; start = end ){
+		    // FOR EACH WORD DO THE MATCHING
+
+	    	while( *start == ' ' ) start++;
+	    	end = start;
+	    	while( *end >= 'a' && *end <= 'z' ) end++;
+	    	sz = end-start;
+
+
+	    	// skip word if found before in the document
+	    	if( TrieVisitedIS( document->visited, start, sz ) ){
+	    		//fprintf( stderr, "doc[%d] word[%.*s] existed\n", doc_id, sz, start );
+	    	   	continue;
+	    	}
+
+	    	//total_words++;
+
+	        batch_words++;
+	    	if( batch_words == 1 ){
+	    		//document->current_trie_search_data = (document->current_trie_search_data + 1) % MAX_TRIE_SEARCH_DATA;
+	    		//tsd = &document->trie_search_data_pool[document->current_trie_search_data];
+	    		tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
+	    		tsd->doc_id = document->doc_id;
+	    		//fprintf( stderr, "handling doc[%d] [%d] [%d]\n", doch->doc_id, documents[doch->doc_id]->doc_id, tsd->doc_id );
+	    		++total_jobs;
+	    	}
+
+	    	tsd->words[batch_words-1] = start;
+	    	tsd->words_sz[batch_words-1] = sz;
+
+	    	if( batch_words == WORDS_PROCESSED_BY_THREAD ){
+	    		tsd->words_num = batch_words;
+	    		batch_words = 0;
+	    		lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int, void*)>(TrieSearchWord), tsd );
+	    		//fprintf( stderr, "handling doc[%d] [%d] [%d]\n", doch->doc_id, documents[doch->doc_id]->doc_id, tsd->doc_id );
+	    		//fprintf(stderr, "doc_id[%d] total_jobs_submitted[%d]\n", document->doc_id, total_doc_jobs_submitted );
+	    	}
+
+	    	// move on to the next word
+	    }
+
+	    // check if there are words unhandled at the moment because of premature exit of the loop
+	    // at the point where we check for previous existence
+
+	if (batch_words > 0) {
+		tsd->words_num = batch_words;
+		batch_words = 0;
+		lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(TrieSearchWord), tsd );
+		//fprintf( stderr, "handling doc[%d] [%d] [%d]\n", doch->doc_id, documents[doch->doc_id]->doc_id, tsd->doc_id );
+		//fprintf(stderr, "doc_id[%d] total_jobs_submitted[%d]\n", document->doc_id, total_doc_jobs_submitted );
+	}
+
+	pthread_mutex_lock( &document->mutex_finished_jobs );
+	document->total_jobs = total_jobs;
+	if( document->total_jobs == document->finished_jobs ){
+				document->total_jobs = -1;
+				//fprintf( stderr, "[%d]", doch->doc_id );
+				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), doch );
+			}
+	pthread_mutex_unlock( &document->mutex_finished_jobs );
+
+
+	return 0;
+}
+
+
+
+
 
 
 /********************************************************************************************
@@ -697,381 +836,13 @@ void* TrieSearchWord( int tid, void* args ){
 
 
 
-
-/********************************************************************************************
- * TRIE LP_MERGESORT STRUCTURE
- *************************************/
-
-struct BinaryTreeNode{
-	BinaryTreeNode* left;
-	BinaryTreeNode* right;
-	QueryID qid;
-	char visited;
-};
-
-
-#define LPMERGESORT_CHILDREN 10
-struct TrieNodeLPMergesort{
-	TrieNodeLPMergesort* children[LPMERGESORT_CHILDREN];
-    unsigned int qid;
-    char pos[MAX_QUERY_WORDS];
-    char entries;
-    char valid;
-};
-
-struct LPMergesortResult{
-	QueryID *ids;
-	unsigned int num_res;
-};
-
-TrieNodeLPMergesort *lp_mergesort_tries[LP_NUM_THREADS];
-
-BinaryTreeNode* BinaryTree_Constructor(){
-	BinaryTreeNode* t = (BinaryTreeNode*)malloc(sizeof(BinaryTreeNode));
-	t->left = 0;
-	t->right = 0;
-	t->qid = 0;
-	t->visited = 0;
-	return t;
-}
-
-void BinaryTree_Destructor( BinaryTreeNode* node ){
-	if( node->left )
-		BinaryTree_Destructor(node->left);
-	if( node->right )
-		BinaryTree_Destructor(node->right);
-	free( node );
-}
-
-void BinaryTreeInsert( BinaryTreeNode* node, QueryID qid ){
-	//fprintf( stderr, "[%d] ", qid );
-	while( 1 ){
-		if( node->qid == qid ){
-			break;
-		}else if( node->qid < qid ){
-			if( node->right ){
-			    node = node->right;
-			    continue;
-			}else{
-				node->right = BinaryTree_Constructor();
-				node = node->right;
-				break;
-			}
-		}else if( node->qid > qid ){
-			if( node->left ){
-				node=node->left;
-				continue;
-			}else{
-				node->left = BinaryTree_Constructor();
-				node = node->left;
-				break;
-			}
-		}
-	}
-	node->qid = qid;
-	//fprintf( stderr, "[%d] ", node->qid );
-}
-
-LPMergesortResult* BinaryTreeTrieFlat( BinaryTreeNode* tree )
-{
-	LPMergesortResult* res = (LPMergesortResult*) malloc(sizeof(LPMergesortResult));
-
-	std::vector<QueryID> ids;
-	std::vector<BinaryTreeNode*> stack;
-
-	// add the children for this trie
-	stack.push_back(tree);
-
-	BinaryTreeNode* c;
-	while (!stack.empty()) {
-		c = stack.back();
-		c->visited = 1;
-		if (c->left && !c->left->visited){
-			stack.push_back(c->left);
-			continue;
-		}
-		stack.pop_back();
-		ids.push_back(c->qid); // PLEASE NOTICE THAT THE FIRST ENTRY IS qid=0 AND SHOULD NOT BE CONSIDERED IN THE FINAL RESULTS
-		if (c->right && !c->right->visited){
-			stack.push_back(c->right);
-		}
-	}
-
-	unsigned int front, sz;
-	res->ids = (QueryID*) malloc(sizeof(QueryID) * ids.size()-1);
-	for (front = 1, sz = ids.size(); front < sz; front++){
-	    //fprintf( stderr, "%d ", ids[front] );
-		res->ids[front-1] = ids[front];
-	}
-	res->num_res = ids.size()-1;
-	return res;
-}
-
-// TRIE FUNCTIONS
-TrieNodeLPMergesort* TrieNodeLPMergesort_Constructor(){
-	TrieNodeLPMergesort* n = (TrieNodeLPMergesort*)malloc(sizeof(TrieNodeLPMergesort));
-    if( !n ) err_mem("error allocating TrieNode");
-    memset( n->children, 0, LPMERGESORT_CHILDREN*sizeof(TrieNodeLPMergesort*) );
-    n->qid = 0;
-    n->pos[0] = n->pos[1] = n->pos[2] = n->pos[3] = n->pos[4] = -1;
-    n->entries = 0;
-    n->valid = 0;
-    return n;
-}
-void TrieNodeLPMergesort_Destructor( TrieNodeLPMergesort* node ){
-    for( char i=0; i<LPMERGESORT_CHILDREN; i++ ){
-    	if( node->children[i] != 0 ){
-    		TrieNodeLPMergesort_Destructor( node->children[i] );
-    	}
-    }
-    free( node );
-}
-
-// Returns 0 if new word added or 1 if existed
-void TrieLPMergesortInsert( TrieNodeLPMergesort* node, unsigned int qid, char pos ){
-   char i;
-   unsigned int nqid = qid;
-   for( ; nqid>0;  ){
-	   i = nqid % 10;
-	   nqid /= 10;
-      if( node->children[i] == 0 ){
-          node->children[i] = TrieNodeLPMergesort_Constructor();
-      }
-      node = node->children[i];
-   }
-   // check if we have a different pos
-   if( node->pos[pos] == -1 ){
-       node->entries++;
-       node->pos[pos] = 1;
-       node->valid = 1;
-       node->qid = qid;
-   }
-}
-
-void TrieLPMergesortFill( TrieNodeLPMergesort* root, QueryArrayList* qids ){
-	if( qids == (QueryArrayList *) 0xffffffffffffffff )
-		return;
-	for( unsigned int i=0, sz=qids->size(); i<sz; i++ ){
-		TrieLPMergesortInsert(root, qids->at(i).qid, qids->at(i).pos);
-	}
-}
-
-void TrieLPMergesortCheckQueries( TrieNodeLPMergesort* root ){
-	std::vector<TrieNodeLPMergesort*> stack;
-	char i;
-	// add the children for this trie
-	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-		if( root->children[i] )
-			stack.push_back(root->children[i]);
-	TrieNodeLPMergesort* c;
-	while( !stack.empty() ){
-		c = stack.back();
-		stack.pop_back();
-		// check the current node if it's a valid query id
-		if( c->valid ){
-			// we must check that the query satisfies constraints
-			if( c->entries == querySet->at( c->qid )->words_num ){
-				// this is a valid qid and must be included
-                // may be inserted in another structure for final results
-
-			}else{
-				c->valid = 0;
-			}
-		}
-		// add the children for this node
-		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-			if( c->children[i] )
-				stack.push_back(c->children[i]);
-	}
-}
-
-// merges Other's nodes into root
-void TrieLPMergesortMerge( TrieNodeLPMergesort* root, TrieNodeLPMergesort* other ){
-	std::vector<TrieNodeLPMergesort*> stack;
-	char i;
-	// add the children for this trie
-	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-		if( other->children[i] )
-			stack.push_back(other->children[i]);
-	TrieNodeLPMergesort* c;
-	while( !stack.empty() ){
-		c = stack.back();
-		stack.pop_back();
-		// check the current node if it's a valid
-		if( c->valid ){
-			for( i=0; i<5; i++ )
-				if( c->pos[i] == 1 )
-			        TrieLPMergesortInsert( root, c->qid, i );
-		}
-		// add the children for this node
-		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-			if( c->children[i] )
-				stack.push_back(c->children[i]);
-	}
-}
-
-// returns the valid nodes inside an array
-LPMergesortResult* TrieLPMergesortFlat( TrieNodeLPMergesort* root ){
-
-	BinaryTreeNode* binroot = BinaryTree_Constructor();
-
-	std::vector<TrieNodeLPMergesort*> queue;
-	char i;
-	unsigned int front=0, sz;
-	// add the children for this trie
-	for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-		if( root->children[i] )
-			queue.push_back(root->children[i]);
-	TrieNodeLPMergesort* c;
-	while( front < queue.size() ){
-		c = queue[front++];
-		// check the current node if it's a valid
-		if( c->valid ){
-			//fprintf( stderr, "qid[%u] ", c->qid );
-			BinaryTreeInsert( binroot, c->qid );
-		}
-		// add the children for this node
-		for( i=0; i<LPMERGESORT_CHILDREN; i++ )
-			if( c->children[i] )
-				queue.push_back(c->children[i]);
-	}
-
-	LPMergesortResult* res = BinaryTreeTrieFlat( binroot );
-	BinaryTree_Destructor( binroot );
-	return res;
-}
-
-// not working as is
-void* TrieLPMergesort( int tid, void* args ){
-    pthread_barrier_t *barriers = (pthread_barrier_t*)args;
-
-///fprintf( stderr, "thread[%d] entered sort\n", tid );
-
-	TrieLPMergesortFill( lp_mergesort_tries[tid] , global_results[tid].qids );
-
-	int working_threads = LP_NUM_THREADS>>1;
-    int phase = 0;
-
-	while( tid < working_threads ){
-		//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
-
-    	phase++;
-
-    	// wait for the other active thread to finish
-    	if( tid + working_threads <= NUM_THREADS ){
-    		//fprintf( stderr, "tid[%d] working threads[%d]\n", tid, working_threads );
-    		//fprintf( stderr, "thread[%d] barred at [%d]\n", tid, tid+working_threads );
-            pthread_barrier_wait( &barriers[tid+working_threads] );
-    	}
-    	TrieLPMergesortMerge( lp_mergesort_tries[tid], lp_mergesort_tries[tid+working_threads] );
-
-    	working_threads >>= 1;
-    }
-
-
-
-	// to release the thread waiting for you
-	if( tid > 0 ){
-		//fprintf( stderr, "thread[%d] barred at 0\n", tid );
-		pthread_barrier_wait( &barriers[tid] );
-	}else if ( tid == 0 ){
-		TrieLPMergesortCheckQueries( lp_mergesort_tries[tid] );
-	}
-	//fprintf( stderr, "thread[%d] finished\n", tid );
-	pthread_barrier_wait( &barriers[0] );
-
-
-	return 0;
-}
-
-/********************************************************************************************
- *  TRIE LP_MERGESORT STRUCTURE END
- ********************************************************************************************/
-
-
-
-/*
- *  PARALLEL ALGORITHMS
- */
-struct mergesort_p{
-	sem_t finished;
-	pthread_cond_t* conds;
-	pthread_mutex_t* mutexes;
-	int *ready;
-	lp_threadpool* pool;
-};
-void lp_mergesort_parallel(int tid, void* args) {
-	//mergesort_p* msp = (mergesort_p*)args;
-
-	pthread_barrier_t *barriers = (pthread_barrier_t*) args;
-
-	//fprintf( stderr, "thread[%d] entered sort\n", tid );
-
-	int working_threads = LP_NUM_THREADS >> 1;
-	int phase = 0;
-
-	std::vector<QueryNode> *qids = global_results[tid].qids;
-	std::vector<QueryNode> temp;
-
-	//PHASE 0 - each thread sorts its part of the array
-	std::stable_sort(qids->begin(),	qids->end(), compareQueryNodes);
-
-	//fprintf( stderr, "tid[%d] size[%d]\n", tid, global_results[tid].qids->size() );
-
-	while (tid < working_threads) {
-		phase++;
-		//fprintf( stderr, "phase[%d] tid[%d] working threads[%d]\n", phase, tid, working_threads );
-
-		// wait for the other active thread to finish
-		if (tid + working_threads <= NUM_THREADS) {
-			pthread_barrier_wait(&barriers[tid + working_threads]);
-		}
-
-		// merge the two lists
-		int i, j, isz, jsz;
-		temp.clear();
-		for( i=0, isz=qids->size(); i<isz; i++)
-			temp.push_back( qids->at(i) );
-		std::vector<QueryNode> *other =	global_results[tid + working_threads].qids;
-
-		isz = temp.size();
-		jsz = other->size();
-		qids->clear();
-		for (i = 0, j = 0; i < isz && j < jsz;) {
-			if (compareQueryNodes(temp.at(i), other->at(j))) {
-				qids->push_back(temp[i++]);
-			} else {
-				qids->push_back(other->at(j++));
-			}
-		}
-		for (; i < isz; )
-			qids->push_back(temp[i++]);
-		for (; j < jsz; )
-			qids->push_back(other->at(j++));
-
-
-		working_threads >>= 1;
-	}
-
-	if (tid > 0) {
-		pthread_barrier_wait(&barriers[tid]);
-	}
-	pthread_barrier_wait(&barriers[0]);
-
-	//fprintf(stderr, "thread[%d] exited sort\n", tid);
-
-	return;
-}
-
-
-
-
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 ErrorCode InitializeIndex(){
 
+	lastMethodCalled = 4;
 
-
+	//fprintf( stderr, "\n\ninitialized index called\n\n" );
 
 	trie_exact = TrieNode_Constructor();
     trie_hamming = (TrieNode**)malloc(sizeof(TrieNode*)*4);
@@ -1086,15 +857,7 @@ ErrorCode InitializeIndex(){
     trie_edit[2] = TrieNode_Constructor();
     trie_edit[3] = TrieNode_Constructor();
 
-    //global_results_locks = (LockingMech*)malloc(sizeof(LockingMech)*NUM_THREADS);
-    //global_results = (ResultTrieSearch*)malloc( sizeof(ResultTrieSearch)*NUM_THREADS );
-//    for( char i=0; i<LP_NUM_THREADS; i++ ){
-//    	global_results[i].qids = new QueryArrayList();
-//    	global_results[i].qids->resize(128);
-//    	global_results[i].qids->clear();
-//    }
-
-    trie_search_data_pool.resize(MAX_TRIE_SEARCH_DATA);
+    documents.push_back((Document*)malloc(sizeof(Document))); // add dummy doc
 
     querySet = new QuerySet();
     // add dummy query to start from index 1 because query ids start from 1 instead of 0
@@ -1111,6 +874,15 @@ ErrorCode InitializeIndex(){
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 ErrorCode DestroyIndex(){
+
+	//fprintf( stderr, "\n\ndestroy index called\n\n" );
+
+	synchronize_complete(threadpool);
+
+	if( lastMethodCalled == 3 ){
+
+			lastMethodCalled = 5;
+		}
 
 //	for( char i=0; i<LP_NUM_THREADS; i++ )
 //		sem_destroy( &semaphores[i] );
@@ -1133,12 +905,6 @@ ErrorCode DestroyIndex(){
     free( trie_hamming );
     free( trie_edit );
 
-    //free( global_results_locks );
-//    for( char i=0; i<LP_NUM_THREADS; i++ ){
-//      	delete global_results[i].qids;
-//    }
-    //free( global_results );
-
     for( unsigned int i=0, sz=querySet->size(); i<sz; i-- ){
     	free( querySet->at(i) );
     }
@@ -1155,6 +921,12 @@ ErrorCode DestroyIndex(){
 
 ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_type, unsigned int match_dist)
 {
+	// if the last call was match document then wait for the jobs to finish
+	if( lastMethodCalled == 3 ){
+		synchronize_complete(threadpool);
+		lastMethodCalled = 1;
+	}
+
 	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
 	qnode->type = match_type;
 	qnode->words = (void**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
@@ -1207,6 +979,13 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 
 ErrorCode EndQuery(QueryID query_id)
 {
+
+	// if the last call was match document then wait for the jobs to finish
+		if( lastMethodCalled == 3 ){
+			synchronize_complete(threadpool);
+			lastMethodCalled = 2;
+		}
+
 	// Remove this query from the active query set
 	QuerySetNode* n = querySet->at(query_id);
 	for( char i=n->words_num-1; i>=0; i-- ){
@@ -1225,161 +1004,38 @@ ErrorCode EndQuery(QueryID query_id)
 // TODO -
 // TODO - Check for the same words in the same document
 // TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
-
-std::vector<QueryID> ids; // used for the final doc results
-TrieNodeVisited *visited =0;
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
-	char k,szz;
-	ids.clear();
 
-	// results are new for each document
-	// TODO - With this we might not need the global_results
-//	for( k=0; k<LP_NUM_THREADS; k++ ){
-//		lp_mergesort_tries[k] = TrieNodeLPMergesort_Constructor();
-//	}
+	lastMethodCalled = 3;
 
+	Document* doc = DocumentConstructor();
+	doc->doc_id = doc_id;
+	documents.push_back( doc );
+	strcpy( doc->doc, doc_str );
 
+	DocumentHandlerNode* dn = (DocumentHandlerNode*)malloc(sizeof(DocumentHandlerNode));
+	dn->doc_id = doc->doc_id;
+	lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentHandler), dn );
 
-	visited = TrieNodeVisited_Constructor();
-
-	//memset(doc_results, 0,100000);
-
+	//fprintf( stderr, "DocumentHandler[%d] added\n", dn->doc_id );
 
 	///////////////////////////////////////////////
     //int s = gettime();
 
-    short batch_words=0;
-    int total_words=0;
-	TrieSearchData *tsd = NULL;
-	const char *start, *end;
-	char sz;
-	int tid=0;
-    for( start=doc_str; *start; start = end ){
-	    // FOR EACH WORD DO THE MATCHING
-
-    	while( *start == ' ' ) start++;
-    	end = start;
-    	while( *end >= 'a' && *end <= 'z' ) end++;
-    	sz = end-start;
-
-
-    	// skip word if found before in the document
-    	if( TrieVisitedIS( visited, start, sz ) ){
-    		//fprintf( stderr, "doc[%d] word[%.*s] existed\n", doc_id, sz, start );
-    	   	continue;
-    	}
-
-    	total_words++;
-
-        batch_words++;
-    	if( batch_words == 1 ){
-    		current_trie_search_data = (current_trie_search_data + 1) % MAX_TRIE_SEARCH_DATA;
-    		tsd = &trie_search_data_pool[current_trie_search_data];
-    	}
-    	tsd->words[batch_words-1] = start;
-    	tsd->words_sz[batch_words-1] = sz;
-
-    	if( batch_words == WORDS_PROCESSED_BY_THREAD ){
-    		tsd->words_num = batch_words;
-    		batch_words = 0;
-    		lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int, void*)>(TrieSearchWord), tsd );
-    	}else if( *end == '\0' ){
-    		// very few words or the last ones so just handle them yourself
-    		// the same thing the THREAD_JOB does
-    		const char* w;
-    		char wsz;
-    		for( int i=0, j=batch_words; i<j; i++ ){
-    			wsz = tsd->words_sz[i];
-    			w = tsd->words[i];
-    			TrieExactSearchWord( 0, trie_exact, w, wsz, &global_results[tid] );
-    			TrieHammingSearchWord( 0, trie_hamming[0], w, wsz, &global_results[tid], 0 );
-    		    TrieHammingSearchWord( 0, trie_hamming[1], w, wsz, &global_results[tid], 1 );
-    			TrieHammingSearchWord( 0, trie_hamming[2], w, wsz, &global_results[tid], 2 );
-    			TrieHammingSearchWord( 0, trie_hamming[3], w, wsz, &global_results[tid], 3 );
-    			TrieEditSearchWord( 0, trie_edit[0], w, wsz, &global_results[tid], 0);
-    			TrieEditSearchWord( 0, trie_edit[1], w, wsz, &global_results[tid], 1 );
-    			TrieEditSearchWord( 0, trie_edit[2], w, wsz, &global_results[tid], 2 );
-    			TrieEditSearchWord( 0, trie_edit[3], w, wsz, &global_results[tid], 3 );
-    		}
-    	}
-
-    	// move on to the next word
-    }
-
-    // check if there are words unhandled at the moment because of premature exit of the loop
-    // at the point where we check for previous existence
-    if( batch_words > 0 ){
-        // very few words or the last ones so just handle them yourself
-        // the same thing the THREAD_JOB does
-        const char* w;
-        char wsz;
-        for( int i=0, j=batch_words; i<j; i++ ){
-        	wsz = tsd->words_sz[i];
-        	w = tsd->words[i];
-        	TrieExactSearchWord( 0, trie_exact, w, wsz, &global_results[tid] );
-        	TrieHammingSearchWord( 0, trie_hamming[0], w, wsz, &global_results[tid], 0 );
-            TrieHammingSearchWord( 0, trie_hamming[1], w, wsz, &global_results[tid], 1 );
-        	TrieHammingSearchWord( 0, trie_hamming[2], w, wsz, &global_results[tid], 2 );
-        	TrieHammingSearchWord( 0, trie_hamming[3], w, wsz, &global_results[tid], 3 );
-        	TrieEditSearchWord( 0, trie_edit[0], w, wsz, &global_results[tid], 0);
-        	TrieEditSearchWord( 0, trie_edit[1], w, wsz, &global_results[tid], 1 );
-        	TrieEditSearchWord( 0, trie_edit[2], w, wsz, &global_results[tid], 2 );
-        	TrieEditSearchWord( 0,  trie_edit[3], w, wsz, &global_results[tid], 3 );
-        }
-    }
-
-
-        /////////////////////////////
-        // FIND A WAY TO SYNCHRONIZE THREADPOOL
-        /////////////////////////////
-        lp_threadpool_synchronize_master( threadpool );
-        // destroy visited table
-        TrieNodeVisited_Destructor( visited );
-        //TrieVisitedClear( visited );
+        //lp_threadpool_synchronize_master( threadpool );
+        //TrieNodeVisited_Destructor( visited );
 
         //fprintf( stderr, "doc[%u] miliseconds: %d\n", doc_id, gettime()-s );
 
-
         //int s = gettime();
 
-//
-//        for( k=0, szz=TOTAL_WORKERS; k<szz; k++ ){
-//        fprintf( stderr, "doc[%d] results[%d][%d] total_words[%d]\n", doc_id,k, global_results[k].qids->size(), total_words );
-//        }
-//        pthread_barrier_t *bars = (pthread_barrier_t*) malloc(sizeof(pthread_barrier_t)*LP_NUM_THREADS);
-//        	for (int g = 1; g < LP_NUM_THREADS; g++)
-//        		pthread_barrier_init(&bars[g], NULL, 2);
-//        	pthread_barrier_init(&bars[0], NULL, TOTAL_WORKERS);
 //
 //            for( batch_words=0; batch_words<NUM_THREADS; batch_words++ ){
 //            	lp_threadpool_addjob( threadpool, reinterpret_cast<void* (*)(int,void*)>(lp_mergesort_parallel), (void*)bars);
 //            }
 //            lp_mergesort_parallel( 0, bars );
 
-
-
-//        ResultTrieSearch *results_all;
-//        results_all = &global_results[NUM_THREADS];
-
-        // TODO - merge the results - CAN BE PARALLED
-//        for( k=0, szz=NUM_THREADS; k<szz; k++ ){
-//        	//fprintf( stderr, "total results[%d]: %d\n", k, results[k]->qids->size() );
-//        	for( QueryArrayList::iterator it=global_results[k].qids->begin(), end=global_results[k].qids->end(); it != end; it++ ){
-//        		global_results[NUM_THREADS].qids->push_back(*it);
-//        	}
-//        }
-
-
-
-
-        // TODO - Parallel sorting
-//        std::stable_sort( results_all->qids->begin(), results_all->qids->end(), compareQueryNodes );
-
-
         //fprintf( stderr, "doc[%u] results: %lu miliseconds: %d\n", doc_id, results_all->qids->size(), gettime()-s );
-
-
-
 
         // FIND THE UNIQUE IDS AND CHECK IF THE QueryIDS are valid as per their words
 
@@ -1420,42 +1076,8 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
         }
 */
 
-        int total_results=0;
-        int nids = querySet->size();
-        unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
-        memset( final_ids, 0, sizeof(unsigned int)*nids );
-        for( int i=0; i<DOC_RESULTS_SIZE; i++ ){
-        	if( doc_results[i] == 1 ){
-        		doc_results[i] = 0;
-                ++final_ids[i/5];
-        	}
-        }
-        for( int i=1; i<nids; i++ ){
-        	if( final_ids[ i ] == querySet->at(i)->words_num ){
-        		final_ids[total_results++] = i;
-        	}
-        }
 
 
-        DocResultsNode doc;
-        doc.docid=doc_id;
-        doc.sz=total_results;
-        doc.qids=final_ids;
-        docResults->push_back(doc);
-
-//     DocResultsNode doc;
-//     	doc.docid=doc_id;
-//     	doc.sz=ids.size();
-//     	doc.qids=0;
-//     	if(doc.sz) doc.qids=(QueryID*)malloc(doc.sz*sizeof(unsigned int));
-//     	for(int i=0, szz=doc.sz;i<szz;i++) doc.qids[i]=ids[i];
-//     	// Add this result to the set of undelivered results
-//     	docResults->push_back(doc);
-
-//	for( k=0; k<LP_NUM_THREADS; k++ ){
-//		TrieNodeLPMergesort_Destructor( lp_mergesort_tries[k] );
-//		global_results[k].qids->clear();
-//	}
 
 	return EC_SUCCESS;
 }
@@ -1464,11 +1086,25 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 
 ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_query_ids)
 {
+
+	DocResultsNode dr;
+	pthread_mutex_lock( &mutex_doc_results );
+	while( docResults->size() < 1 ){
+		pthread_cond_wait( &cond_doc_results, &mutex_doc_results );
+	}
+	dr = docResults->back();
+	docResults->pop_back();
+	pthread_mutex_unlock( &mutex_doc_results );
+
+	//fprintf( stderr, "getNextResult tid[%d]\n", dr.docid );
+
     // get the docResult from the back of the list if any and return it
 	*p_doc_id=0; *p_num_res=0; *p_query_ids=0;
-	if(docResults->empty()) return EC_NO_AVAIL_RES;
-	*p_doc_id=docResults->back().docid; *p_num_res=docResults->back().sz; *p_query_ids=docResults->back().qids;
-	docResults->pop_back();
+	//if(docResults->empty()) return EC_NO_AVAIL_RES;
+	*p_doc_id=dr.docid; *p_num_res=dr.sz; *p_query_ids=dr.qids;
+
+	//fprintf( stderr, "getNextResult tid[%d]\n", dr.docid );
+
 	return EC_SUCCESS;
 }
 
