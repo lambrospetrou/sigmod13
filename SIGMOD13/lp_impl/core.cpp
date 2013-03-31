@@ -144,6 +144,8 @@ typedef struct{
    pthread_cond_t sleep;
    pthread_barrier_t pool_barrier;
 
+   char headsTime;
+
 }lp_threadpool;
 
 struct HammingNode{
@@ -164,20 +166,19 @@ struct EditNode{
  ***********************************************************************/
 
 int lastMethodCalled = -1; // 1=StartQuery, 2=EndQuery, 3=MatchDocument, 4=InitializeIndex, 5=DestroyIndex
-std::vector<Document*> documents;
 
-pthread_mutex_t mutex_doc_results = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond_doc_results = PTHREAD_COND_INITIALIZER;
+lp_threadpool* threadpool;
+
+std::vector<Document*> documents;
+QuerySet *querySet; // std::vector<QuerySetNode*>
 
 TrieNode *trie_exact;
 TrieNode **trie_hamming;
 TrieNode **trie_edit;
 
-QuerySet *querySet; // std::vector<QuerySetNode*>
 DocResults *docResults; // std::list<DocResultsNode>
-
-// THREADPOOL
-lp_threadpool* threadpool;
+pthread_mutex_t mutex_doc_results = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond_doc_results = PTHREAD_COND_INITIALIZER;
 
 /**********************************************************************
  * FUNCTION PROTOTYPES
@@ -518,8 +519,14 @@ void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void
          pool->jobs_tail = njob;
      }else{
          // add new job to the tail of the queue
-         pool->jobs_tail->next = njob;
-         pool->jobs_tail = njob;
+    	 if( pool->headsTime == 1 ){
+             pool->jobs_tail->next = njob;
+             pool->jobs_tail = njob;
+    	 }else{
+    		 njob->next = pool->jobs_head;
+    		 pool->jobs_head = njob;
+    	 }
+    	 pool->headsTime *= -1;
      }
 
      pool->pending_jobs++;
@@ -622,6 +629,8 @@ lp_threadpool* lp_threadpool_init( int threads ){
     pool->worker_threads = worker_threads;
 
     pthread_barrier_init( &pool->pool_barrier, NULL, 25 );
+
+    pool->headsTime = 0;
 
     // unlock pool for workers
     pthread_mutex_unlock( &pool->mutex_pool );
