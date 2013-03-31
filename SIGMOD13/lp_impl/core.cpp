@@ -44,11 +44,11 @@
 #define TOTAL_WORKERS NUM_THREADS+1
 
 #define WORDS_PROCESSED_BY_THREAD 400
-#define SPARSE_ARRAY_NODE_DATA 13107 // 2^16 / 5 in order to fit in cache block 64K
+#define SPARSE_ARRAY_NODE_DATA 32738 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
-#define CACHE_ENABLED
+//#define CACHE_ENABLED
 
 
 /***********************************************************
@@ -759,7 +759,7 @@ void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char
 	   for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
 		   SparseArraySet( doc->query_ids, it->qid, it->pos );
 #ifdef CACHE_ENABLED
-           cache_qids->push_back( *it );
+           //cache_qids->push_back( *it );
 #endif
 		}
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
@@ -1048,22 +1048,31 @@ void* FinishingJob( int tid, void* args ){
 
 	return 0;
 }
-
+bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
+	if( a.qid < b.qid  )
+		return true;
+	if( a.qid > b.qid )
+		return false;
+	return a.pos <= b.pos;
+}
 void* TrieSearchWord( int tid, void* args ){
 	TrieSearchData *tsd = (TrieSearchData *)args;
 	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
 	const char* w;
 	char wsz;
 	Document *doc = documents[tsd->doc_id];
-
+	QueryArrayList *qids;
 	//char *dres = doc->qids;
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
 		w = tsd->words[i];
 
+#ifdef CACHE_ENABLED
+
 		pthread_mutex_lock( &mutex_cache );
-		QueryArrayList *qids = TrieFind(cache, w, wsz);
+		qids = TrieFind(cache, w, wsz);
 		pthread_mutex_unlock( &mutex_cache );
+#endif
 
 		// check if the word results exist in the cache
         // if they exist we do not have to search again, just take the results
@@ -1078,7 +1087,7 @@ void* TrieSearchWord( int tid, void* args ){
 
         	qids = new QueryArrayList();
 
-			TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
+        	//TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
 			TrieHammingSearchWord( qids, trie_hamming[0], w, wsz, doc, 0 );
 			TrieHammingSearchWord( qids, trie_hamming[1], w, wsz, doc, 1 );
 			TrieHammingSearchWord( qids, trie_hamming[2], w, wsz, doc, 2 );
@@ -1089,10 +1098,36 @@ void* TrieSearchWord( int tid, void* args ){
 			TrieEditSearchWord( qids, trie_edit[3], w, wsz, doc, 3 );
 
 			// TODO - might be better if duplicates were removed from this stage inside qids
+#ifdef CACHE_ENABLED
+//			if( qids->size() > 100 ){
+//				std::stable_sort( qids->begin(), qids->end(), compareQueryNodes );
+//				QueryNode previous = qids->at(0), c;
+//				unsigned int index=1;
+//				int same = 0;
+//				for (unsigned int i=1, sz=qids->size(); i<sz; i++){
+//					c = qids->at(i);
+//					if( c.qid == previous.qid ){
+//						if( c.pos == previous.pos ){
+//							same = 1;
+//						}
+//					}
+//					if( !same ){
+//						qids->at(index++) = c;
+//					}
+//					previous.pos = c.pos;
+//					previous.qid = c.qid;
+//				}
+//				if( index < qids->size() ){
+//					qids->resize(index);
+//				}
+//			}
 			pthread_mutex_lock( &mutex_cache );
 			CacheInsertResults( cache, w, wsz, qids );
             pthread_mutex_unlock( &mutex_cache );
+#endif
         }
+        TrieExactSearchWord( NULL, trie_exact, w, wsz, doc );
+
 	}
 
 	// check if all jobs are finished
