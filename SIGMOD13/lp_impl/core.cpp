@@ -48,6 +48,9 @@
 
 #define VALID_CHARS 26
 
+#define CACHE_ENABLED
+
+
 /***********************************************************
  * STRUCTURES
  ***********************************************************/
@@ -176,6 +179,9 @@ TrieNode *trie_exact;
 TrieNode **trie_hamming;
 TrieNode **trie_edit;
 
+TrieNode *cache = 0;
+pthread_mutex_t mutex_cache = PTHREAD_MUTEX_INITIALIZER;
+
 DocResults *docResults; // std::list<DocResultsNode>
 pthread_mutex_t mutex_doc_results = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond_doc_results = PTHREAD_COND_INITIALIZER;
@@ -201,9 +207,13 @@ unsigned int* SparseArrayCompress(SparseArrayNode* array, unsigned int * total);
 TrieNode* TrieNode_Constructor();
 void TrieNode_Destructor( TrieNode* node );
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos );
-void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, Document*doc );
-void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
-void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
+QueryArrayList* TrieFind( TrieNode* node, const char* word, char word_sz );
+void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char* word, char word_sz, Document*doc );
+void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
+void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
+void CacheInsertResults( TrieNode* cache, const char* word, char word_sz, QueryArrayList* qids );
+
+
 
 TrieNodeVisited* TrieNodeVisited_Constructor();
 void TrieNodeVisited_Destructor( TrieNodeVisited* node );
@@ -291,11 +301,6 @@ ErrorCode DestroyIndex(){
 
 	synchronize_complete(threadpool);
 
-/*
-	for( int i=0; i<CACHE_SIZE; i++ )
-		pthread_mutex_destroy(&cache_exact->at(i).mutex);
-	delete cache_exact;
-*/
     TrieNode_Destructor( trie_exact  );
     TrieNode_Destructor( trie_hamming[0] );
     TrieNode_Destructor( trie_hamming[1] );
@@ -413,6 +418,12 @@ ErrorCode EndQuery(QueryID query_id)
 // TODO - Check for the same words in the same document
 // TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
+
+	if( lastMethodCalled != 3 ){
+		if( cache )
+			TrieNode_Destructor(cache);
+		cache = TrieNode_Constructor();
+	}
 
 	lastMethodCalled = 3;
 
@@ -712,7 +723,24 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
    node->qids->push_back(qn);
    return node;
 }
-void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, Document*doc ){
+QueryArrayList* TrieFind( TrieNode* root, const char* word, char word_sz ){
+	char p, i, found=1;
+	   for( p=0; p<word_sz; p++ ){
+		   i = word[p] -'a';
+		   if( root->children[i] != 0 ){
+	           root = root->children[i];
+		   }else{
+			   found=0;
+			   break;
+		   }
+	   }
+	   if( found && root->qids ){
+	       // WE HAVE A MATCH SO get the List of the query ids and add them to the result
+		   return root->qids;
+	    }
+	   return 0;
+}
+void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char* word, char word_sz, Document*doc ){
 	//fprintf( stderr, "[1] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, root, word_sz, word, 0, results );
 
    char p, i, found=1;
@@ -730,11 +758,14 @@ void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_
 	   pthread_mutex_lock( &doc->mutex_query_ids );
 	   for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
 		   SparseArraySet( doc->query_ids, it->qid, it->pos );
+#ifdef CACHE_ENABLED
+           cache_qids->push_back( *it );
+#endif
 		}
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
     }
 }
-void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
+void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
 	//fprintf( stderr, "[2] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
 	HammingNode current, n;
@@ -765,7 +796,9 @@ void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word
 				pthread_mutex_lock( &doc->mutex_query_ids );
 				for (QueryArrayList::iterator it = current.node->qids->begin(),end = current.node->qids->end(); it != end; it++) {
 					SparseArraySet( doc->query_ids, it->qid, it->pos );
-
+#ifdef CACHE_ENABLED
+                    cache_qids->push_back( *it );
+#endif
 				}
 				pthread_mutex_unlock( &doc->mutex_query_ids );
 			} else if (word_sz > current.depth) {
@@ -782,7 +815,7 @@ void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word
 		}
 	}
 }
-void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
+void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
     EditNode c, n;
@@ -823,6 +856,9 @@ void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz
         	pthread_mutex_lock( &doc->mutex_query_ids );
 			for (QueryArrayList::iterator it = c.node->qids->begin(), end =	c.node->qids->end(); it != end; it++) {
 				SparseArraySet( doc->query_ids, it->qid, it->pos );
+#ifdef CACHE_ENABLED
+                cache_qids->push_back( *it );
+#endif
 			}
 			pthread_mutex_unlock( &doc->mutex_query_ids );
         }
@@ -843,6 +879,21 @@ void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz
 			}// there is no possible match further
 		}
 	}
+}
+void CacheInsertResults( TrieNode* cache, const char* word, char word_sz, QueryArrayList* qids ){
+	   char ptr=0;
+	   char pos;
+	   while( ptr < word_sz ){
+	      pos = word[ptr] - 'a';
+	      if( cache->children[pos] == 0 ){
+	         cache->children[pos] = TrieNode_Constructor();
+	      }
+	      cache = cache->children[pos];
+	      ptr++;
+	   }
+	   if( !cache->qids ){
+	       cache->qids = qids;
+	   }
 }
 
 // TRIE VISITED STRUCTURE END
@@ -1009,15 +1060,39 @@ void* TrieSearchWord( int tid, void* args ){
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
 		w = tsd->words[i];
-		TrieExactSearchWord(  tid, trie_exact, w, wsz, doc );
-		TrieHammingSearchWord( tid, trie_hamming[0], w, wsz, doc, 0 );
-		TrieHammingSearchWord( tid, trie_hamming[1], w, wsz, doc, 1 );
-		TrieHammingSearchWord( tid, trie_hamming[2], w, wsz, doc, 2 );
-		TrieHammingSearchWord( tid, trie_hamming[3], w, wsz, doc, 3 );
-		TrieEditSearchWord( tid, trie_edit[0], w, wsz, doc, 0 );
-		TrieEditSearchWord( tid, trie_edit[1], w, wsz, doc, 1 );
-		TrieEditSearchWord( tid, trie_edit[2], w, wsz, doc, 2 );
-		TrieEditSearchWord( tid, trie_edit[3], w, wsz, doc, 3 );
+
+		pthread_mutex_lock( &mutex_cache );
+		QueryArrayList *qids = TrieFind(cache, w, wsz);
+		pthread_mutex_unlock( &mutex_cache );
+
+		// check if the word results exist in the cache
+        // if they exist we do not have to search again, just take the results
+        if( qids != 0 ){
+        	pthread_mutex_lock(&doc->mutex_query_ids);
+        	for (QueryArrayList::iterator it = qids->begin(), end = qids->end(); it != end; it++) {
+        			   SparseArraySet( doc->query_ids, it->qid, it->pos );
+        			}
+        	pthread_mutex_unlock( &doc->mutex_query_ids );
+        }else{
+		// results are in QueryArrayList format so now we must just iterate over the list and add them to the doc
+
+        	qids = new QueryArrayList();
+
+			TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
+			TrieHammingSearchWord( qids, trie_hamming[0], w, wsz, doc, 0 );
+			TrieHammingSearchWord( qids, trie_hamming[1], w, wsz, doc, 1 );
+			TrieHammingSearchWord( qids, trie_hamming[2], w, wsz, doc, 2 );
+			TrieHammingSearchWord( qids, trie_hamming[3], w, wsz, doc, 3 );
+			TrieEditSearchWord( qids, trie_edit[0], w, wsz, doc, 0 );
+			TrieEditSearchWord( qids, trie_edit[1], w, wsz, doc, 1 );
+			TrieEditSearchWord( qids, trie_edit[2], w, wsz, doc, 2 );
+			TrieEditSearchWord( qids, trie_edit[3], w, wsz, doc, 3 );
+
+			// TODO - might be better if duplicates were removed from this stage inside qids
+			pthread_mutex_lock( &mutex_cache );
+			CacheInsertResults( cache, w, wsz, qids );
+            pthread_mutex_unlock( &mutex_cache );
+        }
 	}
 
 	// check if all jobs are finished
