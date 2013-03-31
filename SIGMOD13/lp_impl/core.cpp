@@ -39,6 +39,62 @@
 #include <list>
 #include <algorithm>
 
+//////////////////////////////////////////
+
+#define NO_LP_LOCKS_ENABLED
+//#define LP_LOCKS_ENABLED
+
+#define NUM_THREADS 24
+#define TOTAL_WORKERS NUM_THREADS+1
+#define LP_NUM_THREADS 32
+
+#define VALID_CHARS 26
+
+#define DOC_RESULTS_SIZE 2000000
+
+/********************************************************************************************
+ * TRIE VISITED STRUCTURE
+ *************************************/
+struct TrieNodeVisited{
+   TrieNodeVisited* children[VALID_CHARS];
+   char exists;
+};
+
+
+
+#define SPARSE_ARRAY_NODE_DATA 13107 // 2^16 / 5 in order to fit in cache block 64K
+struct SparseArrayNode{
+	SparseArrayNode* next;
+	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS];
+	unsigned int low;
+	unsigned int high;
+};
+
+struct Document{
+	char *doc; // might be faster if not fixed size
+	DocID doc_id;
+	int total_jobs;
+	int finished_jobs;
+	//char *qids; // initialized to num of queries * 5 or 8
+	TrieNodeVisited *visited; // only the matching job
+	pthread_mutex_t mutex_finished_jobs;
+	SparseArrayNode* query_ids;
+	pthread_mutex_t mutex_query_ids;
+};
+
+
+SparseArrayNode* SparseArray_Constructor();
+void SparseArray_Destructor(SparseArrayNode* n);
+void SparseArraySet( SparseArrayNode* sa, unsigned int index, char pos );
+unsigned int* SparseArrayCompress(SparseArrayNode* array, unsigned int * total);
+
+
+
+
+
+
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 int gettime()
@@ -280,16 +336,10 @@ void synchronize_complete(lp_threadpool* pool){
  *  THREADPOOL STRUCTURE END
  ********************************************************************************************/
 
-#define NO_LP_LOCKS_ENABLED
-//#define LP_LOCKS_ENABLED
 
-#define NUM_THREADS 24
-#define TOTAL_WORKERS NUM_THREADS+1
-#define LP_NUM_THREADS 32
 
-#define VALID_CHARS 26
 
-#define DOC_RESULTS_SIZE 100000
+
 
 
 /********************************************************************************************
@@ -311,7 +361,6 @@ struct _ResultTrieSearch{
 };
 // both initialized in InitializeIndex()
 //ResultTrieSearch global_results[LP_NUM_THREADS+1];
-
 
 typedef struct _TrieNode TrieNode;
 struct _TrieNode{
@@ -364,7 +413,7 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
 // above are the same regardless of query type
 ////////////////////////////////////////////////
 
-void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, /*ResultTrieSearch* local_results*/char* doc_results ){
+void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_sz, /*char* doc_results*/Document*doc ){
 	//fprintf( stderr, "[1] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, root, word_sz, word, 0, results );
 
    char p, i, found=1;
@@ -380,7 +429,11 @@ void TrieExactSearchWord( char tid, TrieNode* root, const char* word, char word_
    if( found && root->qids ){
        // WE HAVE A MATCH SO get the List of the query ids and add them to the result
 		for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
-			doc_results[(it->qid)*5 + it->pos] = 1;
+			pthread_mutex_lock( &doc->mutex_query_ids );
+							SparseArraySet( doc->query_ids, it->qid, it->pos );
+							pthread_mutex_unlock( &doc->mutex_query_ids );
+
+			//doc_results[(it->qid)*5 + it->pos] = 1;
 			//local_results->qids->push_back(*it);
 		}
     }
@@ -392,7 +445,7 @@ struct HammingNode{
 	char depth;
 	char tcost;
 };
-void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*ResultTrieSearch* local_results*/char* doc_results, char maxCost ){
+void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*char* doc_results*/Document*doc, char maxCost ){
 	//fprintf( stderr, "[2] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
 	HammingNode current, n;
@@ -421,7 +474,10 @@ void TrieHammingSearchWord( char tid, TrieNode* node, const char* word, int word
 			if (word_sz == current.depth && current.node->qids != 0) {
 				// ADD THE node->qids[] INTO THE RESULTS
 				for (QueryArrayList::iterator it = current.node->qids->begin(),end = current.node->qids->end(); it != end; it++) {
-					doc_results[(it->qid)*5 + it->pos] = 1;
+					pthread_mutex_lock( &doc->mutex_query_ids );
+									SparseArraySet( doc->query_ids, it->qid, it->pos );
+									pthread_mutex_unlock( &doc->mutex_query_ids );
+					//doc_results[(it->qid)*5 + it->pos] = 1;
 					//local_results->qids->push_back(*it);
 				}
 			} else if (word_sz > current.depth) {
@@ -444,7 +500,7 @@ struct EditNode{
 	char previous[MAX_WORD_LENGTH+1];
 	char letter;
 };
-void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*ResultTrieSearch* local_results*/char* doc_results, char maxCost ){
+void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz, /*char* doc_results*/Document*doc, char maxCost ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
     EditNode c, n;
@@ -483,7 +539,10 @@ void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz
         if( current[word_sz] <= maxCost && c.node->qids!=0 ){
             // ADD THE node->qids[] INTO THE RESULTS
 			for (QueryArrayList::iterator it = c.node->qids->begin(), end =	c.node->qids->end(); it != end; it++) {
-				doc_results[(it->qid)*5 + it->pos] = 1;
+				pthread_mutex_lock( &doc->mutex_query_ids );
+				SparseArraySet( doc->query_ids, it->qid, it->pos );
+				pthread_mutex_unlock( &doc->mutex_query_ids );
+				//doc_results[(it->qid)*5 + it->pos] = 1;
 				//local_results->qids->push_back(*it);
 			}
         }
@@ -512,13 +571,7 @@ void TrieEditSearchWord( char tid, TrieNode* node, const char* word, int word_sz
  *  TRIE STRUCTURE END
  ********************************************************************************************/
 
-/********************************************************************************************
- * TRIE VISITED STRUCTURE
- *************************************/
-struct TrieNodeVisited{
-   TrieNodeVisited* children[VALID_CHARS];
-   char exists;
-};
+
 TrieNodeVisited* TrieNodeVisited_Constructor(){
    TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
    if( !n ) err_mem("error allocating TrieNode");
@@ -588,6 +641,10 @@ struct DocResultsNode{
 };
 typedef std::vector<DocResultsNode> DocResults;
 
+
+
+
+
 // STRUCTURES FOR PTHREADS
 #define WORDS_PROCESSED_BY_THREAD 400
 struct TrieSearchData{
@@ -598,19 +655,6 @@ struct TrieSearchData{
 	DocID doc_id;
 };
 
-#define MAX_TRIE_SEARCH_DATA 10
-
-struct Document{
-	char *doc; // might be faster if not fixed size
-	DocID doc_id;
-	int total_jobs;
-	int finished_jobs;
-	char *qids; // initialized to num of queries * 5 or 8
-	TrieNodeVisited *visited; // only the matching job
-	pthread_mutex_t mutex_finished_jobs;
-	//TrieSearchData trie_search_data_pool[MAX_TRIE_SEARCH_DATA];
-	//unsigned int current_trie_search_data;
-};
 
 Document* DocumentConstructor(){
     Document* doc = (Document*)malloc(sizeof(Document));
@@ -618,18 +662,22 @@ Document* DocumentConstructor(){
     doc->doc_id=0;
     doc->finished_jobs = 0;
     doc->total_jobs = MAX_DOC_LENGTH;
-    doc->qids = (char*)malloc( DOC_RESULTS_SIZE );
-    memset(doc->qids, 0, DOC_RESULTS_SIZE);
+    //doc->qids = (char*)malloc( DOC_RESULTS_SIZE );
+    //memset(doc->qids, 0, DOC_RESULTS_SIZE);
     doc->visited = TrieNodeVisited_Constructor();
     pthread_mutex_init( &doc->mutex_finished_jobs, NULL );
-    //doc->current_trie_search_data = 0;
+    pthread_mutex_init( &doc->mutex_query_ids, NULL );
+    doc->query_ids = SparseArray_Constructor();
     return doc;
 }
 
 void DocumentDestructor( Document *doc ){
 	free( doc->doc );
-	free( doc->qids );
+	//free( doc->qids );
 	TrieNodeVisited_Destructor( doc->visited );
+	SparseArray_Destructor( doc->query_ids );
+	pthread_mutex_destroy( &doc->mutex_finished_jobs );
+	pthread_mutex_destroy( &doc->mutex_query_ids );
 	free( doc );
 }
 
@@ -659,6 +707,72 @@ DocResults *docResults; // std::list<DocResultsNode>
 lp_threadpool* threadpool;
 
 
+/********************************************************************************************
+ *  SPARSE ARRAY STRUCTURE
+ *************************************/
+
+SparseArrayNode* SparseArray_Constructor(){
+	SparseArrayNode* sa = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
+	sa->low = 0;
+	sa->high = sa->low + SPARSE_ARRAY_NODE_DATA-1;
+	memset( sa->data, 0, SPARSE_ARRAY_NODE_DATA*MAX_QUERY_WORDS );
+	sa->next = 0;
+	return sa;
+}
+void SparseArray_Destructor(SparseArrayNode* n){
+	for( SparseArrayNode* prev; n; n=prev ){
+		prev = n->next;
+		free( n );
+	}
+}
+
+void SparseArraySet( SparseArrayNode* sa, unsigned int index, char pos ){
+	SparseArrayNode* prev=sa;
+	for( ; sa && sa->high < index ; sa=sa->next ){
+		prev = sa;
+	}
+    // the case where we finished the array without results
+	// OR
+	// we must create a node before this one because this is a block for bigger ids
+	if( sa == 0 || sa->low > index ){
+		sa = SparseArray_Constructor();
+		sa->next = prev->next;
+        prev->next = sa;
+        sa->low = ( (index / SPARSE_ARRAY_NODE_DATA)*SPARSE_ARRAY_NODE_DATA );
+        sa->high = sa->low + SPARSE_ARRAY_NODE_DATA-1;
+	}
+
+	// sa holds the block where we need to insert the value
+	sa->data[ index - sa->low ][pos] = 1;
+	//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
+}
+
+unsigned int* SparseArrayCompress(SparseArrayNode* array, unsigned int * total){
+	unsigned int nids = querySet->size();
+	unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
+	unsigned int total_found=0, row;
+	char pos=0;
+	for( ; array ; array = array->next ){
+		for( int i=0; i<SPARSE_ARRAY_NODE_DATA; i++ ){
+			row = array->low + i;
+			pos = array->data[ i ][0] + array->data[ i ][1] + array->data[ i ][2] + array->data[ i ][3] + array->data[ i ][4];
+			if( row < nids && row > 0 && pos == querySet->at(row)->words_num ){
+				//fprintf( stderr, "row[%u]\n",  row );
+                final_ids[ total_found++ ] = row;
+			}
+		}
+	}
+	*total = total_found;
+	return final_ids;
+}
+
+
+/********************************************************************************************
+ *  END SPARSE ARRAY STRUCTURE
+ *************************************/
+
+
+
 // it is assumed that this document finished processing
 void* FinishingJob( int tid, void* args ){
     //DocID *doc_id = (DocID*)args;
@@ -667,26 +781,29 @@ void* FinishingJob( int tid, void* args ){
     //fprintf( stderr, "Finishing[%u]\n", doch->doc_id );
 
     Document* doc = documents[doch->doc_id];
-    char *doc_results = doc->qids;
+    //char *doc_results = doc->qids;
 
-    int total_results=0;
-            unsigned int nids = querySet->size();
-            unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
-            memset( final_ids, 0, sizeof(unsigned int)*nids );
-            for( unsigned int i=0; i<DOC_RESULTS_SIZE; i++ ){
-            	//fprintf( stderr, "\n%d ", i );
-            	if( doc_results[i] == 1 ){
-            		doc_results[i] = 0;
-                    ++final_ids[i/5];
-            	}
-            }
-            for( unsigned int i=1; i<nids; i++ ){
-            	if( final_ids[ i ] == querySet->at(i)->words_num ){
-            		final_ids[total_results++] = i;
-            	}
-            }
+//    unsigned int total_results;
+//            unsigned int nids = querySet->size();
+//            unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
+//            memset( final_ids, 0, sizeof(unsigned int)*nids );
+//            for( unsigned int i=0; i<DOC_RESULTS_SIZE; i++ ){
+//            	//fprintf( stderr, "\n%d ", i );
+//            	if( doc_results[i] == 1 ){
+//            		doc_results[i] = 0;
+//                    ++final_ids[i/5];
+//            	}
+//            }
+//            for( unsigned int i=1; i<nids; i++ ){
+//            	if( final_ids[ i ] == querySet->at(i)->words_num ){
+//            		final_ids[total_results++] = i;
+//            	}
+//            }
 
             //DocumentDestructor(doc);
+
+            unsigned int total_results;
+            unsigned int *final_ids = SparseArrayCompress(doc->query_ids, &total_results);
 
             DocResultsNode docr;
             docr.docid=doch->doc_id;
@@ -712,20 +829,19 @@ void* TrieSearchWord( int tid, void* args ){
 	char wsz;
 	Document *doc = documents[tsd->doc_id];
 
-
-	char *dres = doc->qids;
+	//char *dres = doc->qids;
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
 		w = tsd->words[i];
-		TrieExactSearchWord(  tid, trie_exact, w, wsz, dres );
-		TrieHammingSearchWord( tid, trie_hamming[0], w, wsz, dres, 0 );
-		TrieHammingSearchWord( tid, trie_hamming[1], w, wsz, dres, 1 );
-		TrieHammingSearchWord( tid, trie_hamming[2], w, wsz, dres, 2 );
-		TrieHammingSearchWord( tid, trie_hamming[3], w, wsz, dres, 3 );
-		TrieEditSearchWord( tid, trie_edit[0], w, wsz, dres, 0 );
-		TrieEditSearchWord( tid, trie_edit[1], w, wsz, dres, 1 );
-		TrieEditSearchWord( tid, trie_edit[2], w, wsz, dres, 2 );
-		TrieEditSearchWord( tid, trie_edit[3], w, wsz, dres, 3 );
+		TrieExactSearchWord(  tid, trie_exact, w, wsz, doc );
+		TrieHammingSearchWord( tid, trie_hamming[0], w, wsz, doc, 0 );
+		TrieHammingSearchWord( tid, trie_hamming[1], w, wsz, doc, 1 );
+		TrieHammingSearchWord( tid, trie_hamming[2], w, wsz, doc, 2 );
+		TrieHammingSearchWord( tid, trie_hamming[3], w, wsz, doc, 3 );
+		TrieEditSearchWord( tid, trie_edit[0], w, wsz, doc, 0 );
+		TrieEditSearchWord( tid, trie_edit[1], w, wsz, doc, 1 );
+		TrieEditSearchWord( tid, trie_edit[2], w, wsz, doc, 2 );
+		TrieEditSearchWord( tid, trie_edit[3], w, wsz, doc, 3 );
 	}
 
 	// check if all jobs are finished
