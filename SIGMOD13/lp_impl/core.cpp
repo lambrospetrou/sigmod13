@@ -47,16 +47,26 @@
 #define SPARSE_ARRAY_NODE_DATA 4096 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
+#define VALID_NUMS 11
 
 /***********************************************************
  * STRUCTURES
  ***********************************************************/
+
+struct TrieNumNode{
+	TrieNumNode* children[VALID_NUMS];
+	char valid;
+	unsigned int id;
+	char pos[MAX_QUERY_WORDS];
+};
 
 struct QuerySetNode{
 	MatchType type;
 	unsigned int match_dist;
 	void **words;
 	char words_num;
+	char num_str[20];
+	char num_str_sz;
 };
 typedef std::vector<QuerySetNode*> QuerySet;
 
@@ -120,7 +130,8 @@ struct Document{
 	int finished_jobs;
 	TrieNodeVisited *visited; // only the matching job
 	pthread_mutex_t mutex_finished_jobs;
-	SparseArray* query_ids;
+	//SparseArray* query_ids;
+	TrieNumNode *query_ids;
 	pthread_mutex_t mutex_query_ids;
 };
 
@@ -200,6 +211,13 @@ void* lp_tpworker_thread( void* _pool );
 void synchronize_threads_master(int tid, void * arg);
 void lp_threadpool_synchronize_master(lp_threadpool* pool);
 void synchronize_complete(lp_threadpool* pool);
+
+TrieNumNode* TrieNumNode_Constructor();
+void TrieNumNode_Destructor( TrieNumNode* node );
+TrieNumNode* TrieNumInsert( TrieNumNode* node, unsigned int num, char pos );
+void TrieNumRemove( TrieNumNode* node, unsigned int num );
+std::vector<unsigned int> TrieNumFlat( TrieNumNode*node );
+unsigned int* TrieNumFlatChecked( TrieNumNode*node );
 
 SparseArrayNode* SparseArrayNode_Constructor();
 SparseArray* SparseArray_Constructor();
@@ -349,6 +367,14 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	qnode->match_dist = match_dist;
 	qnode->words = (void**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
     qnode->words_num = 0;
+
+    unsigned int num = query_id;
+	char sz_digits = 0;
+	for (; num > 0;) {
+		qnode->num_str[sz_digits++] = num % 10;
+		num /= 10;
+	}
+	qnode->num_str_sz = sz_digits;
 
     TrieNode**t=0, *n = 0;
 	const char *start, *end;
@@ -681,6 +707,110 @@ void synchronize_complete(lp_threadpool* pool){
     pthread_mutex_unlock( &pool->mutex_pool );
 }
 
+// TRIENUM FUNCTIONS
+
+TrieNumNode* TrieNumNode_Constructor(){
+	TrieNumNode* n = (TrieNumNode*)malloc(sizeof(TrieNumNode));
+	n->valid = 0;
+	memset( n->children, 0, sizeof( TrieNumNode* )*VALID_NUMS );
+	n->pos[0] = n->pos[1] = n->pos[2] = n->pos[3] = n->pos[4] = 0;
+	return n;
+}
+void TrieNumNode_Destructor(TrieNumNode* node){
+	for (char i = 0; i < VALID_NUMS; i++) {
+		if (node->children[i] != 0) {
+			TrieNumNode_Destructor(node->children[i]);
+		}
+	}
+	free( node );
+}
+TrieNumNode* TrieNumInsert( TrieNumNode* node, unsigned int num, char pos ){
+	char *number = querySet->at(num)->num_str;
+    char sz_digits = querySet->at(num)->num_str_sz;
+	char ptr=sz_digits, cdigit;
+	while (ptr > 0) {
+		cdigit = number[ptr-1];
+		if (node->children[cdigit] == 0) {
+			node->children[cdigit] = TrieNumNode_Constructor();
+		}
+		node = node->children[cdigit];
+		ptr--;
+	}
+	node->id = num;
+	node->valid = 1;
+	node->pos[pos] = 1;
+	return node;
+}
+void TrieNumRemove( TrieNumNode* node, unsigned int num ){
+	// it is assumed that the num already exists inside the TrieNum
+	char *number = querySet->at(num)->num_str;
+	char sz_digits = querySet->at(num)->num_str_sz;
+	char ptr=sz_digits, digit;
+	while (ptr > 0) {
+		digit = number[ptr-1];
+		node = node->children[ digit ];
+		ptr--;
+	}
+	node->valid = 0;
+}
+unsigned int* TrieNumFlatChecked( TrieNumNode*node, unsigned int *total_results ){
+	std::vector<unsigned int> nums;
+	std::vector<TrieNumNode*> queue;
+	unsigned int front=0;
+
+	for( char i=0; i<VALID_NUMS; i++ ){
+		if( node->children[i] )
+			queue.push_back( node->children[i] );
+	}
+	TrieNumNode* c;
+	while( front < queue.size() ){
+        c = queue.at(front++);
+
+        if( c->valid ){
+        	char words_num;
+            words_num = c->pos[0] + c->pos[1] + c->pos[2] + c->pos[3] + c->pos[4];
+            if( words_num == querySet->at( c->id )->words_num )
+        	    nums.push_back(c->id);
+        }
+       	for( char i=0; i<VALID_NUMS; i++ ){
+      		if( c->children[i] ){
+       			queue.push_back(c->children[i]);
+      		}
+       	}
+	}
+	*total_results = nums.size();
+	unsigned int* final_ids = (unsigned int*)malloc(sizeof(unsigned int)* *total_results);
+	for( unsigned int i=0, sz=nums.size(); i<sz; i++ )
+		final_ids[i] = nums.at(i);
+    return final_ids;
+}
+std::vector<unsigned int> TrieNumFlat( TrieNumNode*node ){
+	std::vector<unsigned int> nums;
+	std::vector<TrieNumNode*> queue;
+	unsigned int front=0;
+
+	for( char i=0; i<VALID_NUMS; i++ ){
+		if( node->children[i] )
+			queue.push_back( node->children[i] );
+	}
+	TrieNumNode* c;
+	while( front < queue.size() ){
+        c = queue.at(front++);
+
+        if( c->valid ){
+        	nums.push_back(c->id);
+        }
+        for( char i=0; i<VALID_NUMS; i++ ){
+        	if( c->children[i] ){
+        		queue.push_back(c->children[i]);
+        	}
+        }
+
+	}
+    return nums;
+}
+
+
 // TRIE FUNCTIONS
 
 TrieNode* TrieNode_Constructor(){
@@ -748,7 +878,8 @@ void TrieExactSearchWord( TrieNode* root, const char* word, char word_sz, Docume
        // WE HAVE A MATCH SO get the List of the query ids and add them to the result
 	   pthread_mutex_lock( &doc->mutex_query_ids );
 	   for (QueryArrayList::iterator it = root->qids[0]->begin(), end = root->qids[0]->end(); it != end; it++) {
-		   SparseArraySet( doc->query_ids, it->qid, it->pos );
+		   //SparseArraySet( doc->query_ids, it->qid, it->pos );
+		   TrieNumInsert( doc->query_ids, it->qid, it->pos );
 		}
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
     }
@@ -787,7 +918,8 @@ void TrieHammingSearchWord( TrieNode* node, const char* word, char word_sz, Docu
 					qids = current.node->qids[dist];
 					if( qids != 0 ){
 						for (QueryArrayList::iterator it = qids->begin(),end = qids->end(); it != end; it++) {
-							SparseArraySet( doc->query_ids, it->qid, it->pos );
+							//SparseArraySet( doc->query_ids, it->qid, it->pos );
+							TrieNumInsert( doc->query_ids, it->qid, it->pos );
 						}
 					}
 				}
@@ -850,7 +982,8 @@ void TrieEditSearchWord( TrieNode* node, const char* word, int word_sz, Document
         			qids = c.node->qids[dist];
         			if( qids != 0 ){
         	      		for (QueryArrayList::iterator it = qids->begin(),end = qids->end(); it != end; it++) {
-        					SparseArraySet( doc->query_ids, it->qid, it->pos );
+        					//SparseArraySet( doc->query_ids, it->qid, it->pos );
+        	      			TrieNumInsert( doc->query_ids, it->qid, it->pos );
         				}
         			}
         		}
@@ -890,7 +1023,6 @@ void TrieNodeVisited_Destructor( TrieNodeVisited* node ){
             TrieNodeVisited_Destructor( node->children[i] );
     	}
     }
-    free( node );
 }
 char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
 	// Returns 0 if new word added or 1 if existed
@@ -928,7 +1060,8 @@ Document* DocumentConstructor(){
     doc->visited = TrieNodeVisited_Constructor();
     pthread_mutex_init( &doc->mutex_finished_jobs, NULL );
     pthread_mutex_init( &doc->mutex_query_ids, NULL );
-    doc->query_ids = SparseArray_Constructor();
+    //doc->query_ids = SparseArray_Constructor();
+    doc->query_ids = TrieNumNode_Constructor();
     return doc;
 }
 void DocumentDestructor( Document *doc ){
@@ -939,7 +1072,8 @@ void DocumentDestructor( Document *doc ){
 void DocumentDeallocate(Document *doc){
 	free( doc->doc );
     TrieNodeVisited_Destructor( doc->visited );
-	SparseArray_Destructor( doc->query_ids );
+	//SparseArray_Destructor( doc->query_ids );
+    TrieNumNode_Destructor( doc->query_ids );
 }
 
 // SPARSE ARRAY STRUCTURE
@@ -967,7 +1101,7 @@ void SparseArray_Destructor(SparseArray* n){
 	free( n );
 }
 void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
-	SparseArrayNode* prev, *cnode;
+	SparseArrayNode* prev=sa->head, *cnode;
 
 	if( index < sa->mid_high ){
 	    // START FROM THE HEAD AND SEARCH FORWARD
@@ -1070,7 +1204,8 @@ void* FinishingJob( int tid, void* args ){
 
 
             unsigned int total_results;
-            unsigned int *final_ids = SparseArrayCompress(doc->query_ids, &total_results);
+            //unsigned int *final_ids = SparseArrayCompress(doc->query_ids, &total_results);
+            unsigned int *final_ids = TrieNumFlatChecked(doc->query_ids, &total_results);
 
             DocResultsNode docr;
             docr.docid=doch->doc_id;
