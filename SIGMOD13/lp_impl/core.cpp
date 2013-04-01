@@ -43,8 +43,8 @@
 #define NUM_THREADS 24
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 400
-#define SPARSE_ARRAY_NODE_DATA 1024 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 100
+#define SPARSE_ARRAY_NODE_DATA 4096 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
@@ -54,6 +54,7 @@
 
 struct QuerySetNode{
 	MatchType type;
+	unsigned int match_dist;
 	void **words;
 	char words_num;
 };
@@ -80,7 +81,7 @@ struct ResultTrieSearch{
 
 struct TrieNode{
    TrieNode* children[VALID_CHARS];
-   QueryArrayList *qids;
+   QueryArrayList *qids[4];
 };
 
 struct TrieSearchData{
@@ -208,13 +209,14 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total);
 
 TrieNode* TrieNode_Constructor();
 void TrieNode_Destructor( TrieNode* node );
-TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos );
-QueryArrayList* TrieFind( TrieNode* node, const char* word, char word_sz );
-void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char* word, char word_sz, Document*doc );
-void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
-void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
-void CacheInsertResults( TrieNode* cache, const char* word, char word_sz, QueryArrayList* qids );
+TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos, unsigned int match_distance );
+void TrieRemove( TrieNode* node, QueryID qid, char pos, char match_distance );
+void TrieExactSearchWord( TrieNode* root, const char* word, char word_sz, Document*doc );
+void TrieHammingSearchWord( TrieNode* node, const char* word, int word_sz, Document*doc );
+void TrieEditSearchWord( TrieNode* node, const char* word, int word_sz, Document*doc );
 
+//void CacheInsertResults( TrieNode* cache, const char* word, char word_sz, QueryArrayList* qids );
+//QueryArrayList* TrieFind( TrieNode* node, const char* word, char word_sz );
 
 
 TrieNodeVisited* TrieNodeVisited_Constructor();
@@ -344,6 +346,7 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 
 	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
 	qnode->type = match_type;
+	qnode->match_dist = match_dist;
 	qnode->words = (void**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
     qnode->words_num = 0;
 
@@ -355,32 +358,34 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 		while( *end >= 'a' && *end <= 'z' ) end++;
 		switch( match_type ){
 		case MT_EXACT_MATCH:
-		   n = TrieInsert( trie_exact , start, end-start, query_id, qnode->words_num );
+		   n = TrieInsert( trie_exact , start, end-start, query_id, qnode->words_num, 0 );
 		   break;
 		case MT_HAMMING_DIST:
-		   t = trie_hamming;
+			n = TrieInsert( trie_hamming[0] , start, end-start, query_id, qnode->words_num, match_dist );
 		   break;
 		case MT_EDIT_DIST:
-		   t = trie_edit;
+			n = TrieInsert( trie_edit[0] , start, end-start, query_id, qnode->words_num, match_dist );
 		   break;
 		}// end of match_type
-		if( match_type != MT_EXACT_MATCH ){
-			switch (match_dist) {
-			case 0:
-				n = TrieInsert(t[0], start, end - start, query_id, qnode->words_num);
-				break;
-			case 1:
-				n = TrieInsert(t[1], start, end - start, query_id, qnode->words_num);
-				break;
-			case 2:
-				n = TrieInsert(t[2], start, end - start, query_id, qnode->words_num);
-				break;
-			case 3:
-				n = TrieInsert(t[3], start, end - start, query_id, qnode->words_num);
-				break;
-			}// end of match_dist
-		}
-        qnode->words[qnode->words_num] = n;
+
+//		if( match_type != MT_EXACT_MATCH ){
+//			switch (match_dist) {
+//			case 0:
+//				n = TrieInsert(t[0], start, end - start, query_id, qnode->words_num);
+//				break;
+//			case 1:
+//				n = TrieInsert(t[1], start, end - start, query_id, qnode->words_num);
+//				break;
+//			case 2:
+//				n = TrieInsert(t[2], start, end - start, query_id, qnode->words_num);
+//				break;
+//			case 3:
+//				n = TrieInsert(t[3], start, end - start, query_id, qnode->words_num);
+//				break;
+//			}// end of match_dist
+//		}
+
+		qnode->words[qnode->words_num] = n;
         qnode->words_num++;
 
 	}// end for each word
@@ -404,12 +409,8 @@ ErrorCode EndQuery(QueryID query_id)
 	// Remove this query from the active query set
 	QuerySetNode* n = querySet->at(query_id);
 	for( char i=n->words_num-1; i>=0; i-- ){
-		for( QueryArrayList::iterator it=((TrieNode*)n->words[i])->qids->begin(), end=((TrieNode*)n->words[i])->qids->end(); it != end; it++  ){
-		    if( it->qid == query_id && it->pos == i ){
-		    	((TrieNode*)n->words[i])->qids->erase(it);
-		    	break;
-		    }
-		}
+		TrieRemove( (TrieNode*)n->words[i], query_id, i, n->match_dist );
+		// void TrieRemove( TrieNode* node, QueryID qid, char pos, char match_distance )
 	}
 	return EC_SUCCESS;
 }
@@ -420,13 +421,6 @@ ErrorCode EndQuery(QueryID query_id)
 // TODO - Check for the same words in the same document
 // TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
-    /*
-	if( lastMethodCalled != 3 ){
-		if( cache )
-			TrieNode_Destructor(cache);
-		cache = TrieNode_Constructor();
-	}
-	*/
 
 	lastMethodCalled = 3;
 
@@ -692,7 +686,7 @@ void synchronize_complete(lp_threadpool* pool){
 TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
    if( !n ) err_mem("error allocating TrieNode");
-   n->qids = 0;
+   n->qids[0] = n->qids[1] = n->qids[2] = n->qids[3] = 0;
    memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
    return n;
 }
@@ -702,11 +696,13 @@ void TrieNode_Destructor( TrieNode* node ){
             TrieNode_Destructor( node->children[i] );
     	}
     }
-    if( node->qids )
-        delete node->qids;
+    if( node->qids[0] ) delete node->qids[0];
+    if( node->qids[1] ) delete node->qids[1];
+    if( node->qids[2] ) delete node->qids[2];
+    if( node->qids[3] ) delete node->qids[3];
     free( node );
 }
-TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
+TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos, unsigned int match_distance ){
    char ptr=0;
    char pos;
    while( ptr < word_sz ){
@@ -717,33 +713,25 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
       node = node->children[pos];
       ptr++;
    }
-   if( !node->qids ){
-       node->qids = new QueryArrayList();
+   if( !node->qids[match_distance] ){
+       node->qids[match_distance] = new QueryArrayList();
    }
    QueryNode qn;
    qn.qid = qid;
    qn.pos = word_pos;
-   node->qids->push_back(qn);
+   node->qids[match_distance]->push_back(qn);
    return node;
 }
-QueryArrayList* TrieFind( TrieNode* root, const char* word, char word_sz ){
-	char p, i, found=1;
-	   for( p=0; p<word_sz; p++ ){
-		   i = word[p] -'a';
-		   if( root->children[i] != 0 ){
-	           root = root->children[i];
-		   }else{
-			   found=0;
-			   break;
-		   }
-	   }
-	   if( found && root->qids ){
-	       // WE HAVE A MATCH SO get the List of the query ids and add them to the result
-		   return root->qids;
-	    }
-	   return 0;
+void TrieRemove( TrieNode* node, QueryID qid, char pos, char match_distance ){
+    QueryArrayList* qids = node->qids[match_distance];
+    for( QueryArrayList::iterator it=qids->begin(), end=qids->end(); it != end; it++  ){
+        if( it->qid == qid && it->pos == pos ){
+    	   	qids->erase(it);
+    		break;
+   	    }
+    }
 }
-void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char* word, char word_sz, Document*doc ){
+void TrieExactSearchWord( TrieNode* root, const char* word, char word_sz, Document*doc ){
 	//fprintf( stderr, "[1] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, root, word_sz, word, 0, results );
 
    char p, i, found=1;
@@ -756,16 +744,16 @@ void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char
 		   break;
 	   }
    }
-   if( found && root->qids ){
+   if( found && root->qids[0] ){
        // WE HAVE A MATCH SO get the List of the query ids and add them to the result
 	   pthread_mutex_lock( &doc->mutex_query_ids );
-	   for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
+	   for (QueryArrayList::iterator it = root->qids[0]->begin(), end = root->qids[0]->end(); it != end; it++) {
 		   SparseArraySet( doc->query_ids, it->qid, it->pos );
 		}
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
     }
 }
-void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
+void TrieHammingSearchWord( TrieNode* node, const char* word, char word_sz, Document*doc ){
 	//fprintf( stderr, "[2] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
 	HammingNode current, n;
@@ -790,12 +778,18 @@ void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const ch
 		if (current.letter != word[current.depth - 1]) {
 			current.tcost++;
 		}
-		if (current.tcost <= maxCost) {
-			if (word_sz == current.depth && current.node->qids != 0) {
+		if (current.tcost <= 3) { // 3= maximum match_distance being checked
+			if (word_sz == current.depth ) {
 				// ADD THE node->qids[] INTO THE RESULTS
+				QueryArrayList* qids;
 				pthread_mutex_lock( &doc->mutex_query_ids );
-				for (QueryArrayList::iterator it = current.node->qids->begin(),end = current.node->qids->end(); it != end; it++) {
-					SparseArraySet( doc->query_ids, it->qid, it->pos );
+				for( char dist=current.tcost; dist<=3; dist++ ){
+					qids = current.node->qids[dist];
+					if( qids != 0 ){
+						for (QueryArrayList::iterator it = qids->begin(),end = qids->end(); it != end; it++) {
+							SparseArraySet( doc->query_ids, it->qid, it->pos );
+						}
+					}
 				}
 				pthread_mutex_unlock( &doc->mutex_query_ids );
 			} else if (word_sz > current.depth) {
@@ -812,7 +806,7 @@ void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const ch
 		}
 	}
 }
-void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
+void TrieEditSearchWord( TrieNode* node, const char* word, int word_sz, Document*doc ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
 
     EditNode c, n;
@@ -848,18 +842,24 @@ void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char*
      		   current[i] = insertCost < deleteCost ? insertCost : deleteCost;
      	   }
         }
-        if( current[word_sz] <= maxCost && c.node->qids!=0 ){
+        if( current[word_sz] <= 3 ){ // 3 = maximum distance cost
             // ADD THE node->qids[] INTO THE RESULTS
+        	QueryArrayList* qids;
         	pthread_mutex_lock( &doc->mutex_query_ids );
-			for (QueryArrayList::iterator it = c.node->qids->begin(), end =	c.node->qids->end(); it != end; it++) {
-				SparseArraySet( doc->query_ids, it->qid, it->pos );
-			}
-			pthread_mutex_unlock( &doc->mutex_query_ids );
+        		for( char dist=current[word_sz]; dist<=3; dist++ ){
+        			qids = c.node->qids[dist];
+        			if( qids != 0 ){
+        	      		for (QueryArrayList::iterator it = qids->begin(),end = qids->end(); it != end; it++) {
+        					SparseArraySet( doc->query_ids, it->qid, it->pos );
+        				}
+        			}
+        		}
+        	pthread_mutex_unlock( &doc->mutex_query_ids );
         }
 
         // if there are more changes available recurse
 		for (i = 0; i <= word_sz; i++) {
-			if (current[i] <= maxCost) {
+			if (current[i] <= 3) { // maximum match_distance cost =3
 				for (j = 0; j < VALID_CHARS; j++) {
 					if (c.node->children[j] != 0) {
 						n.letter = 'a' + j;
@@ -873,21 +873,6 @@ void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char*
 			}// there is no possible match further
 		}
 	}
-}
-void CacheInsertResults( TrieNode* cache, const char* word, char word_sz, QueryArrayList* qids ){
-	   char ptr=0;
-	   char pos;
-	   while( ptr < word_sz ){
-	      pos = word[ptr] - 'a';
-	      if( cache->children[pos] == 0 ){
-	         cache->children[pos] = TrieNode_Constructor();
-	      }
-	      cache = cache->children[pos];
-	      ptr++;
-	   }
-	   if( !cache->qids ){
-	       cache->qids = qids;
-	   }
 }
 
 // TRIE VISITED STRUCTURE END
@@ -1116,20 +1101,19 @@ void* TrieSearchWord( int tid, void* args ){
 	const char* w;
 	char wsz;
 	Document *doc = documents[tsd->doc_id];
-	QueryArrayList *qids = 0;
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
 		w = tsd->words[i];
 
-        	TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
-			TrieHammingSearchWord( qids, trie_hamming[0], w, wsz, doc, 0 );
-			TrieHammingSearchWord( qids, trie_hamming[1], w, wsz, doc, 1 );
-			TrieHammingSearchWord( qids, trie_hamming[2], w, wsz, doc, 2 );
-			TrieHammingSearchWord( qids, trie_hamming[3], w, wsz, doc, 3 );
-			TrieEditSearchWord( qids, trie_edit[0], w, wsz, doc, 0 );
-			TrieEditSearchWord( qids, trie_edit[1], w, wsz, doc, 1 );
-			TrieEditSearchWord( qids, trie_edit[2], w, wsz, doc, 2 );
-			TrieEditSearchWord( qids, trie_edit[3], w, wsz, doc, 3 );
+        	TrieExactSearchWord( trie_exact, w, wsz, doc );
+			TrieHammingSearchWord( trie_hamming[0], w, wsz, doc );
+			//TrieHammingSearchWord( trie_hamming[1], w, wsz, doc );
+			//TrieHammingSearchWord( trie_hamming[2], w, wsz, doc );
+			//TrieHammingSearchWord( trie_hamming[3], w, wsz, doc );
+			TrieEditSearchWord( trie_edit[0], w, wsz, doc );
+			//TrieEditSearchWord( trie_edit[1], w, wsz, doc );
+			//TrieEditSearchWord( trie_edit[2], w, wsz, doc );
+			//TrieEditSearchWord( trie_edit[3], w, wsz, doc );
 
 	}
 
