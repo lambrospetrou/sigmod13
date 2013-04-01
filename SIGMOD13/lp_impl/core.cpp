@@ -43,21 +43,17 @@
 #define NUM_THREADS 24
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 200
-#define SPARSE_ARRAY_NODE_DATA 2048 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 400
+#define SPARSE_ARRAY_NODE_DATA 1024 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
-
-
 
 /***********************************************************
  * STRUCTURES
  ***********************************************************/
 
 struct QuerySetNode{
-	//QueryID qid;
 	MatchType type;
-	//char cost;
 	void **words;
 	char words_num;
 };
