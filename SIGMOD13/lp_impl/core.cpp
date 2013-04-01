@@ -43,12 +43,11 @@
 #define NUM_THREADS 24
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 400
-#define SPARSE_ARRAY_NODE_DATA 32738 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 200
+#define SPARSE_ARRAY_NODE_DATA 2048 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
-//#define CACHE_ENABLED
 
 
 /***********************************************************
@@ -104,9 +103,16 @@ struct TrieNodeVisited{
 
 struct SparseArrayNode{
 	SparseArrayNode* next;
+	SparseArrayNode* prev;
 	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS];
 	unsigned int low;
 	unsigned int high;
+};
+struct SparseArray{
+	SparseArrayNode* head;
+	SparseArrayNode* tail;
+	unsigned int num_nodes;
+	unsigned int mid_high;
 };
 
 struct Document{
@@ -117,7 +123,7 @@ struct Document{
 	int finished_jobs;
 	TrieNodeVisited *visited; // only the matching job
 	pthread_mutex_t mutex_finished_jobs;
-	SparseArrayNode* query_ids;
+	SparseArray* query_ids;
 	pthread_mutex_t mutex_query_ids;
 };
 
@@ -179,7 +185,6 @@ TrieNode *trie_exact;
 TrieNode **trie_hamming;
 TrieNode **trie_edit;
 
-TrieNode *cache = 0;
 pthread_mutex_t mutex_cache = PTHREAD_MUTEX_INITIALIZER;
 
 DocResults *docResults; // std::list<DocResultsNode>
@@ -199,10 +204,11 @@ void synchronize_threads_master(int tid, void * arg);
 void lp_threadpool_synchronize_master(lp_threadpool* pool);
 void synchronize_complete(lp_threadpool* pool);
 
-SparseArrayNode* SparseArray_Constructor();
-void SparseArray_Destructor(SparseArrayNode* n);
-void SparseArraySet( SparseArrayNode* sa, unsigned int index, char pos );
-unsigned int* SparseArrayCompress(SparseArrayNode* array, unsigned int * total);
+SparseArrayNode* SparseArrayNode_Constructor();
+SparseArray* SparseArray_Constructor();
+void SparseArray_Destructor(SparseArray* n);
+void SparseArraySet( SparseArray* sa, unsigned int index, char pos );
+unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total);
 
 TrieNode* TrieNode_Constructor();
 void TrieNode_Destructor( TrieNode* node );
@@ -345,7 +351,7 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	qnode->words = (void**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
     qnode->words_num = 0;
 
-    TrieNode**t=0, *n;
+    TrieNode**t=0, *n = 0;
 	const char *start, *end;
 	for( start=query_str; *start; start = end ){
 		while( *start == ' ' ) start++;
@@ -418,12 +424,13 @@ ErrorCode EndQuery(QueryID query_id)
 // TODO - Check for the same words in the same document
 // TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
-
+    /*
 	if( lastMethodCalled != 3 ){
 		if( cache )
 			TrieNode_Destructor(cache);
 		cache = TrieNode_Constructor();
 	}
+	*/
 
 	lastMethodCalled = 3;
 
@@ -758,9 +765,6 @@ void TrieExactSearchWord( QueryArrayList* cache_qids, TrieNode* root, const char
 	   pthread_mutex_lock( &doc->mutex_query_ids );
 	   for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
 		   SparseArraySet( doc->query_ids, it->qid, it->pos );
-#ifdef CACHE_ENABLED
-           //cache_qids->push_back( *it );
-#endif
 		}
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
     }
@@ -796,9 +800,6 @@ void TrieHammingSearchWord( QueryArrayList* cache_qids, TrieNode* node, const ch
 				pthread_mutex_lock( &doc->mutex_query_ids );
 				for (QueryArrayList::iterator it = current.node->qids->begin(),end = current.node->qids->end(); it != end; it++) {
 					SparseArraySet( doc->query_ids, it->qid, it->pos );
-#ifdef CACHE_ENABLED
-                    cache_qids->push_back( *it );
-#endif
 				}
 				pthread_mutex_unlock( &doc->mutex_query_ids );
 			} else if (word_sz > current.depth) {
@@ -856,9 +857,6 @@ void TrieEditSearchWord( QueryArrayList* cache_qids, TrieNode* node, const char*
         	pthread_mutex_lock( &doc->mutex_query_ids );
 			for (QueryArrayList::iterator it = c.node->qids->begin(), end =	c.node->qids->end(); it != end; it++) {
 				SparseArraySet( doc->query_ids, it->qid, it->pos );
-#ifdef CACHE_ENABLED
-                cache_qids->push_back( *it );
-#endif
 			}
 			pthread_mutex_unlock( &doc->mutex_query_ids );
         }
@@ -965,49 +963,110 @@ void DocumentDeallocate(Document *doc){
 
 // SPARSE ARRAY STRUCTURE
 
-SparseArrayNode* SparseArray_Constructor(){
-	SparseArrayNode* sa = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
-	sa->low = 0;
-	sa->high = sa->low + SPARSE_ARRAY_NODE_DATA-1;
-	memset( sa->data, 0, SPARSE_ARRAY_NODE_DATA*MAX_QUERY_WORDS );
-	sa->next = 0;
-	return sa;
+SparseArrayNode* SparseArrayNode_Constructor(){
+	SparseArrayNode* n = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
+		n->low = 0;
+		n->high = n->low + SPARSE_ARRAY_NODE_DATA-1;
+		memset( n->data, 0, SPARSE_ARRAY_NODE_DATA*MAX_QUERY_WORDS );
+		n->next = n->prev = 0;
+		return n;
 }
-void SparseArray_Destructor(SparseArrayNode* n){
-	for( SparseArrayNode* prev; n; n=prev ){
-		prev = n->next;
-		free( n );
-	}
+SparseArray* SparseArray_Constructor(){
+	SparseArray *array = (SparseArray*)malloc(sizeof(SparseArray));
+	array->tail = array->head = SparseArrayNode_Constructor();
+	array->num_nodes = 1;
+	array->mid_high = array->head->high;
+	return array;
 }
-void SparseArraySet( SparseArrayNode* sa, unsigned int index, char pos ){
-	SparseArrayNode* prev=sa;
-	for( ; sa && sa->high < index ; sa=sa->next ){
-		prev = sa;
+void SparseArray_Destructor(SparseArray* n){
+	for( SparseArrayNode* prev; n->head; n->head=prev ){
+		prev = n->head->next;
+		free( n->head );
 	}
-    // the case where we finished the array without results
-	// OR
-	// we must create a node before this one because this is a block for bigger ids
-	if( sa == 0 || sa->low > index ){
-		sa = SparseArray_Constructor();
-		sa->next = prev->next;
-        prev->next = sa;
-        sa->low = ( (index / SPARSE_ARRAY_NODE_DATA)*SPARSE_ARRAY_NODE_DATA );
-        sa->high = sa->low + SPARSE_ARRAY_NODE_DATA-1;
+	free( n );
+}
+void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
+	SparseArrayNode* prev, *cnode;
+
+	if( index < sa->mid_high ){
+	    // START FROM THE HEAD AND SEARCH FORWARD
+
+		for( cnode=sa->head; cnode && cnode->high < index ; cnode=cnode->next ){
+			prev = cnode;
+		}
+		// the case where we finished the array without results
+		// OR
+		// we must create a node before this one because this is a block for bigger ids
+		if( cnode == 0 || cnode->low > index ){
+			cnode = SparseArrayNode_Constructor();
+			cnode->next = prev->next;
+			cnode->prev = prev;
+			prev->next = cnode;
+			if( cnode->next != 0 ){
+				cnode->next->prev = cnode;
+			}
+			cnode->low = ( (index / SPARSE_ARRAY_NODE_DATA)*SPARSE_ARRAY_NODE_DATA );
+			cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA-1;
+			sa->num_nodes++;
+			if( sa->num_nodes % 2 == 1 ){
+				// we must increase the mid_high
+				unsigned int i=0;
+				for( prev=sa->head; i < (sa->num_nodes/2) ; i++ ){
+					prev = prev->next;
+				}
+				sa->mid_high = prev->high;
+			}
+		}
+	}else{
+		// START FROM THE TAIL AND SEARCH BACKWARD
+		for( cnode=sa->tail; cnode->low > index ; cnode=cnode->prev ){
+			// move back
+		}
+		// the case where we stopped at a node with HIGH less than index and we must create a new node cause LOW is also less than index
+		// OR
+		// the case where we stopped at the right node
+		if( cnode->high < index ){
+			prev = cnode;
+			cnode = SparseArrayNode_Constructor();
+			if( prev == sa->tail ){
+				sa->tail = cnode;
+			}
+			cnode->next = prev->next;
+			cnode->prev = prev;
+			prev->next = cnode;
+			if (cnode->next != 0) {
+				cnode->next->prev = cnode;
+			}
+			cnode->low = ((index / SPARSE_ARRAY_NODE_DATA)* SPARSE_ARRAY_NODE_DATA);
+			cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA - 1;
+			sa->num_nodes++;
+			if (sa->num_nodes % 2 == 1) {
+				// we must increase the mid_high
+				unsigned int i = 0;
+				for (prev = sa->head; i < (sa->num_nodes / 2); i++) {
+					prev = prev->next;
+				}
+				sa->mid_high = prev->high;
+			}
+
+		}
 	}
 
-	// sa holds the block where we need to insert the value
-	sa->data[ index - sa->low ][pos] = 1;
+
+	// cnode holds the block where we need to insert the value
+	cnode->data[ index - cnode->low ][pos] = 1;
 	//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
 }
-unsigned int* SparseArrayCompress(SparseArrayNode* array, unsigned int * total){
+unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 	unsigned int nids = querySet->size();
 	unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
 	unsigned int total_found=0, row;
 	char pos=0;
-	for( ; array ; array = array->next ){
+	SparseArrayNode*cnode = array->head;
+	for( ; cnode ; cnode = cnode->next ){
 		for( int i=0; i<SPARSE_ARRAY_NODE_DATA; i++ ){
-			row = array->low + i;
-			pos = array->data[ i ][0] + array->data[ i ][1] + array->data[ i ][2] + array->data[ i ][3] + array->data[ i ][4];
+			row = cnode->low + i;
+			pos = cnode->data[ i ][0] + cnode->data[ i ][1] + cnode->data[ i ][2] + cnode->data[ i ][3] + cnode->data[ i ][4];
 			if( row < nids && row > 0 && pos == querySet->at(row)->words_num ){
 				//fprintf( stderr, "row[%u]\n",  row );
                 final_ids[ total_found++ ] = row;
@@ -1061,33 +1120,12 @@ void* TrieSearchWord( int tid, void* args ){
 	const char* w;
 	char wsz;
 	Document *doc = documents[tsd->doc_id];
-	QueryArrayList *qids;
-	//char *dres = doc->qids;
+	QueryArrayList *qids = 0;
 	for( int i=0, j=tsd->words_num; i<j; i++ ){
 		wsz = tsd->words_sz[i];
 		w = tsd->words[i];
 
-#ifdef CACHE_ENABLED
-
-		pthread_mutex_lock( &mutex_cache );
-		qids = TrieFind(cache, w, wsz);
-		pthread_mutex_unlock( &mutex_cache );
-#endif
-
-		// check if the word results exist in the cache
-        // if they exist we do not have to search again, just take the results
-        if( qids != 0 ){
-        	pthread_mutex_lock(&doc->mutex_query_ids);
-        	for (QueryArrayList::iterator it = qids->begin(), end = qids->end(); it != end; it++) {
-        			   SparseArraySet( doc->query_ids, it->qid, it->pos );
-        			}
-        	pthread_mutex_unlock( &doc->mutex_query_ids );
-        }else{
-		// results are in QueryArrayList format so now we must just iterate over the list and add them to the doc
-
-        	qids = new QueryArrayList();
-
-        	//TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
+        	TrieExactSearchWord( qids, trie_exact, w, wsz, doc );
 			TrieHammingSearchWord( qids, trie_hamming[0], w, wsz, doc, 0 );
 			TrieHammingSearchWord( qids, trie_hamming[1], w, wsz, doc, 1 );
 			TrieHammingSearchWord( qids, trie_hamming[2], w, wsz, doc, 2 );
@@ -1096,37 +1134,6 @@ void* TrieSearchWord( int tid, void* args ){
 			TrieEditSearchWord( qids, trie_edit[1], w, wsz, doc, 1 );
 			TrieEditSearchWord( qids, trie_edit[2], w, wsz, doc, 2 );
 			TrieEditSearchWord( qids, trie_edit[3], w, wsz, doc, 3 );
-
-			// TODO - might be better if duplicates were removed from this stage inside qids
-#ifdef CACHE_ENABLED
-//			if( qids->size() > 100 ){
-//				std::stable_sort( qids->begin(), qids->end(), compareQueryNodes );
-//				QueryNode previous = qids->at(0), c;
-//				unsigned int index=1;
-//				int same = 0;
-//				for (unsigned int i=1, sz=qids->size(); i<sz; i++){
-//					c = qids->at(i);
-//					if( c.qid == previous.qid ){
-//						if( c.pos == previous.pos ){
-//							same = 1;
-//						}
-//					}
-//					if( !same ){
-//						qids->at(index++) = c;
-//					}
-//					previous.pos = c.pos;
-//					previous.qid = c.qid;
-//				}
-//				if( index < qids->size() ){
-//					qids->resize(index);
-//				}
-//			}
-			pthread_mutex_lock( &mutex_cache );
-			CacheInsertResults( cache, w, wsz, qids );
-            pthread_mutex_unlock( &mutex_cache );
-#endif
-        }
-        TrieExactSearchWord( NULL, trie_exact, w, wsz, doc );
 
 	}
 
