@@ -736,7 +736,7 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
    node->qids->push_back(qn);
    return node;
 }
-TrieNode* TrieCreateEmpty( TrieNode* node, const char* word, char word_sz ){
+TrieNode* TrieCreateEmptyIfNotExists( TrieNode* node, const char* word, char word_sz ){
    char ptr=0;
    char pos;
    while( ptr < word_sz ){
@@ -1160,33 +1160,47 @@ void* TrieSearchWord( int tid, void* args ){
 		//////////////////////////////////////////////
 
         pthread_mutex_lock( &db_index.tries[wsz]->mutex_node );
-
-        QueryArrayList *qids = 0;
-        qids = TrieFind( db_index.tries[wsz], w, wsz );
+        TrieNode *created_index_node = TrieCreateEmptyIfNotExists( db_index.tries[wsz], w, wsz );
+        QueryArrayList *qids = created_index_node->qids;
+        pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
         if( qids == 0 ){
             // WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
+        	pthread_mutex_lock( &created_index_node->mutex_node );
+        	// recheck one more time and avoid making calculations if another thread did it while checking the if statement
+        	qids = created_index_node->qids;
+        	if( qids == 0 ){
 
-        	TrieNode *created_index_node = TrieCreateEmpty( db_index.tries[wsz], w, wsz );
-        	qids = new QueryArrayList(0);
+				qids = new QueryArrayList(0);
 
-		    // Search the QueryDB and find the matches for the current word
-        	TrieExactSearchWord( qids, db_query.tries[wsz].tries[0], w, wsz, doc );
-			TrieHammingSearchWord( qids, db_query.tries[wsz].tries[1], w, wsz, doc, 0 );
-			TrieHammingSearchWord( qids, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
-			TrieHammingSearchWord( qids, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
-			TrieHammingSearchWord( qids, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
-			for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
-			    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-			    	continue;
-				TrieEditSearchWord( qids, db_query.tries[low_sz].tries[5], w, wsz, doc, 0 );
-				TrieEditSearchWord( qids, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
-				TrieEditSearchWord( qids, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
-				TrieEditSearchWord( qids, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
-			}
+				// Search the QueryDB and find the matches for the current word
+				TrieExactSearchWord( qids, db_query.tries[wsz].tries[0], w, wsz, doc );
+				TrieHammingSearchWord( qids, db_query.tries[wsz].tries[1], w, wsz, doc, 0 );
+				TrieHammingSearchWord( qids, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
+				TrieHammingSearchWord( qids, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
+				TrieHammingSearchWord( qids, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
+				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
+					if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
+						continue;
+					TrieEditSearchWord( qids, db_query.tries[low_sz].tries[5], w, wsz, doc, 0 );
+					TrieEditSearchWord( qids, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
+					TrieEditSearchWord( qids, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
+					TrieEditSearchWord( qids, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
+				}
+				// we have the results so just add them in the index_db
+				created_index_node->qids = qids;
 
-			// we have the results so just add them in the index_db
-            created_index_node->qids = qids;
+        	}else{
+				// we found the word in the index so we just take the results and insert them into the doc
+
+				pthread_mutex_lock(&doc->mutex_query_ids);
+				for (QueryArrayList::iterator it = qids->begin(), end =	qids->end(); it != end; it++) {
+					SparseArraySet(doc->query_ids, it->qid, it->pos);
+				}
+				pthread_mutex_unlock(&doc->mutex_query_ids);
+        	}
+
+            pthread_mutex_unlock( &created_index_node->mutex_node );
 
         }else{
 
@@ -1200,7 +1214,6 @@ void* TrieSearchWord( int tid, void* args ){
 
         }
 
-		pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
 	    //////////////////////////////////////////////
 		// WORD PROCESSING END
