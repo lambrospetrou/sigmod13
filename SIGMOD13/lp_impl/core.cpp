@@ -339,21 +339,42 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 		lastMethodCalled = 1;
 	}
 
+	char qwords[MAX_QUERY_WORDS][MAX_WORD_LENGTH+1];
+	qwords[0][0] = qwords[1][0] = qwords[2][0] = qwords[3][0] = qwords[4][0] = '\0';
+
 	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
 	qnode->type = match_type;
 	qnode->words = (void**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
     qnode->words_num = 0;
 
-    TrieNode**t=0, *n = 0;
-    int trie_index, wsz;
-
+    TrieNode *n = 0;
+    int trie_index, wsz, i, j;
+    char found;
 	const char *start, *end;
 	for( start=query_str; *start; start = end ){
 		while( *start == ' ' ) start++;
 		end = start;
 		while( *end >= 'a' && *end <= 'z' ) end++;
 		wsz = end - start;
-
+		// check if the word appeared before
+        found = 0;
+        for( i=0; i<MAX_QUERY_WORDS; i++ ){
+        	for( j=0; j<wsz; j++ ){
+        		if( qwords[i][j]!=start[j] ){
+        			break;
+        		}
+        	}
+        	if( j==wsz && qwords[j]=='\0' ){
+        		found = 1;
+        		break;
+        	}
+        }
+        if( found ) continue;
+        else{
+        	for( i=0; i<wsz; i++ )
+        		qwords[qnode->words_num][i] = start[i];
+        	qwords[qnode->words_num][wsz] = '\0';
+        }
 
 		switch( match_type ){
 		case MT_EXACT_MATCH:
