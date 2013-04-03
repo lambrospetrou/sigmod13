@@ -1200,7 +1200,6 @@ void* TrieSearchWord( int tid, void* args ){
 
         }
 
-
 		pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
 	    //////////////////////////////////////////////
