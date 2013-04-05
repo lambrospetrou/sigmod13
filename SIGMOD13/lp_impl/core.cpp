@@ -343,25 +343,24 @@ ErrorCode DestroyIndex(){
 ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_type, unsigned int match_dist)
 {
 	// if the last call was match document then wait for the jobs to finish
-	if( lastMethodCalled == 3 ){
+	if( lastMethodCalled != 1 ){
 		synchronize_complete(threadpool);
 		lastMethodCalled = 1;
 	}
-
-	int i,j;
-	char qwords[MAX_QUERY_WORDS][MAX_WORD_LENGTH+1];
-	qwords[0][0] = qwords[1][0] = qwords[2][0] = qwords[3][0] = qwords[4][0] = '\0';
 
 	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
 	qnode->type = match_type;
 	qnode->words = (TrieNode**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
     qnode->words_num = 0;
-    for( i=0; i<MAX_QUERY_WORDS; i++ ){
+    for( int i=0; i<MAX_QUERY_WORDS; i++ ){
     	qnode->indexdb_nodes[i] = new std::vector<TrieNode*>();
     }
     pthread_mutex_init( &qnode->mutex_indexdb_nodes, NULL );
-
     querySet->push_back(qnode); // add the new query in the query set - still unfinished though
+
+	int i,j;
+	char qwords[MAX_QUERY_WORDS][MAX_WORD_LENGTH+1];
+	qwords[0][0] = qwords[1][0] = qwords[2][0] = qwords[3][0] = qwords[4][0] = '\0';
 
     int trie_index=0, wsz;
     char found;
@@ -395,6 +394,8 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
         // START PROCESSING NEW WORD FOR QUERY
         ///////////////////////////////////////////////////
 
+        int current_word_index = qnode->words_num;
+
 		switch( match_type ){
 		case MT_EXACT_MATCH:
 			trie_index = 0;
@@ -423,35 +424,34 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 			}// end of match_dist
 		}
 
-		TrieNode *querydb_node = TrieInsert(db_query.tries[wsz].tries[trie_index], start, wsz, query_id, qnode->words_num);
-		qnode->words[qnode->words_num] = querydb_node;
 
-		//fprintf( stderr, "back.qid[%d] back.pos[%d] query_node.size[%u]\n", querydb_node->qids->back().qid, querydb_node->qids->back().pos, querydb_node->qids->size() );
-
-		// WE MUST UPDATE THE INDEX DB with the new query id
+		pthread_mutex_lock( &db_query.tries[wsz].tries[trie_index]->mutex_node );
+		TrieNode *querydb_node = TrieInsert(db_query.tries[wsz].tries[trie_index], start, wsz, query_id, current_word_index);
+		qnode->words[current_word_index] = querydb_node;
+		unsigned int qids_sz = querydb_node->qids->size();
+		pthread_mutex_unlock( &db_query.tries[wsz].tries[trie_index]->mutex_node );
 
 		// if the word exists inside the query db then just take the indexdb_nodes and insert your id on them
 		// eitherwise make a full update in indexdb
-		if( querydb_node->qids->size() > 1 ){
+		if( qids_sz > 1 ){
 		//if( false ){
+
+			pthread_mutex_lock( &querydb_node->mutex_node );
+
 		    // the word already exists in indexdb
-			//unsigned int older_qid = querydb_node->qids->at(0).qid;
-			//char older_pos = querydb_node->qids->at(0).pos;
 			unsigned int older_qid = querydb_node->qids->front().qid;
 			char older_pos = querydb_node->qids->front().pos;
 
-
-			//fprintf( stderr, "current qid[%d] older[%d]\n", query_id, older_qid );
-
+			QueryNode qn;
 			std::vector<TrieNode*> *old_index_nodes = querySet->at(older_qid)->indexdb_nodes[older_pos];
 			for( i=0,j=old_index_nodes->size(); i<j; i++ ){
-				QueryNode qn;
 				qn.qid = query_id;
-				qn.pos = qnode->words_num;
+				qn.pos = current_word_index;
 				old_index_nodes->at(i)->qids->push_back(qn);
-				qnode->indexdb_nodes[qnode->words_num]->push_back( old_index_nodes->at(i) );
-				//fprintf( stderr, "inserted [%d]", index_nodes->at(i)->qids->at(index_nodes->at(i)->qids->size()-1) );
+				qnode->indexdb_nodes[current_word_index]->push_back( old_index_nodes->at(i) );
 			}
+
+			pthread_mutex_unlock( &querydb_node->mutex_node );
 
 		}else{
 			// make a full search and update the indexdb and also insert the new word
@@ -464,45 +464,45 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 						if (low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH)
 							continue;
 						indexdb_node = db_index.tries[low_sz];
-						TrieUpdateEdit( indexdb_node, start, wsz, query_id, qnode->words_num, match_dist , qnode->indexdb_nodes[qnode->words_num] );
+						pthread_mutex_lock( &indexdb_node->mutex_node );
+						TrieUpdateEdit( indexdb_node, start, wsz, query_id, current_word_index, match_dist , qnode->indexdb_nodes[current_word_index] );
+						pthread_mutex_unlock( &indexdb_node->mutex_node );
 					}
 				}else{
 					indexdb_node = db_index.tries[wsz];
-					TrieUpdateHamming( indexdb_node, start, wsz, query_id, qnode->words_num, match_dist, qnode->indexdb_nodes[qnode->words_num] );
+					pthread_mutex_lock( &indexdb_node->mutex_node );
+					TrieUpdateHamming( indexdb_node, start, wsz, query_id, current_word_index, match_dist, qnode->indexdb_nodes[current_word_index] );
+					pthread_mutex_unlock( &indexdb_node->mutex_node );
 				}
 			}
 
-			if( !(created_indexdb_node=TrieFindID( db_index.tries[wsz], start, wsz,query_id, qnode->words_num )) ){
-				created_indexdb_node = TrieInsert(db_index.tries[wsz], start, wsz, query_id, qnode->words_num);
-			    qnode->indexdb_nodes[qnode->words_num]->push_back(created_indexdb_node);
+			pthread_mutex_lock( &db_index.tries[wsz]->mutex_node );
+			if( !(created_indexdb_node=TrieFindID( db_index.tries[wsz], start, wsz,query_id, current_word_index )) ){
+				created_indexdb_node = TrieInsert(db_index.tries[wsz], start, wsz, query_id, current_word_index);
+			    qnode->indexdb_nodes[current_word_index]->push_back(created_indexdb_node);
 			}
+			pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
 			// QUERY IDS ALREADY IN INDEXDB DO NOT GET INSERTED INTO THE NEW NODE->QIDS
-			// TODO - check it immediately
 			// SEARCH THE query_db to find matches
 
 			// MUST BE CAREFULL WITH LOCKING WHEN THEY WILL BE PARALLELIZED
 
 			//
-			//if (match_type != MT_EXACT_MATCH) {
-				//if (match_type == MT_EDIT_DIST) {
-					for (int low_sz = wsz - 3, high_sz = wsz+ 3; low_sz <= high_sz; low_sz++) {
-						if (low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH)
-							continue;
-						TrieUpdateQueryEdit(db_query.tries[low_sz].tries[5], start, wsz, 0, created_indexdb_node);
-						TrieUpdateQueryEdit(db_query.tries[low_sz].tries[6], start, wsz, 1, created_indexdb_node);
-						TrieUpdateQueryEdit(db_query.tries[low_sz].tries[7], start, wsz, 2, created_indexdb_node);
-						TrieUpdateQueryEdit(db_query.tries[low_sz].tries[8], start, wsz, 3, created_indexdb_node);
-					}
-				//} else {
-					TrieUpdateQueryHamming(db_query.tries[wsz].tries[1], start, wsz, 0,created_indexdb_node);
-					TrieUpdateQueryHamming(db_query.tries[wsz].tries[2], start, wsz, 1,created_indexdb_node);
-					TrieUpdateQueryHamming(db_query.tries[wsz].tries[3], start, wsz, 2,created_indexdb_node);
-					TrieUpdateQueryHamming(db_query.tries[wsz].tries[4], start, wsz, 3,created_indexdb_node);
-			//	}
-			//}else{
-				//TrieUpdateQueryExact(db_query.tries[wsz].tries[0], start, wsz, match_dist,	created_indexdb_node);
-			//}
+		    for (int low_sz = wsz - 3, high_sz = wsz+ 3; low_sz <= high_sz; low_sz++) {
+				if (low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH)
+					continue;
+			    //TrieUpdateQueryEdit(db_query.tries[low_sz].tries[5], start, wsz, 0, created_indexdb_node);
+				TrieUpdateQueryEdit(db_query.tries[low_sz].tries[6], start, wsz, 1, created_indexdb_node);
+				TrieUpdateQueryEdit(db_query.tries[low_sz].tries[7], start, wsz, 2, created_indexdb_node);
+				TrieUpdateQueryEdit(db_query.tries[low_sz].tries[8], start, wsz, 3, created_indexdb_node);
+			}
+			//TrieUpdateQueryHamming(db_query.tries[wsz].tries[1], start, wsz, 0,created_indexdb_node);
+			TrieUpdateQueryHamming(db_query.tries[wsz].tries[2], start, wsz, 1,created_indexdb_node);
+			TrieUpdateQueryHamming(db_query.tries[wsz].tries[3], start, wsz, 2,created_indexdb_node);
+			TrieUpdateQueryHamming(db_query.tries[wsz].tries[4], start, wsz, 3,created_indexdb_node);
+			// no need to check exact since the word already got inserted
+			//TrieUpdateQueryExact(db_query.tries[wsz].tries[0], start, wsz, match_dist,	created_indexdb_node);
 
 
 		}
@@ -547,7 +547,6 @@ ErrorCode EndQuery(QueryID query_id)
     	std::vector<TrieNode*> *vector_node = n->indexdb_nodes[i];
     	for( unsigned int j=0, sz=vector_node->size(); j < sz; j++ ){
     		ctn = vector_node->at(j);
-    		//fprintf( stderr, "qid[%d] indexdb_node[%d] sz[%d] node_ptr[%p] node->qids.size()[%u]\n", query_id, i, sz, ctn, ctn->qids->size() );
     		for( QueryArrayList::iterator itt=ctn->qids->begin(), endd=ctn->qids->end(); itt != endd; itt++  ){
 				if( itt->qid==query_id && itt->pos == i ){
 					ctn->qids->erase( itt );
@@ -562,21 +561,11 @@ ErrorCode EndQuery(QueryID query_id)
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-// TODO -
-// TODO - Check for the same words in the same document
-// TODO - Check the cache for words in previous documents too and get the results without running the algorithms again
 ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
-
-//	if( lastMethodCalled != 3 ){
-//		for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
-//		    TrieNode_Destructor( db_index.tries[i] );
-//		}
-//		for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
-//		    db_index.tries[i] = TrieNode_Constructor();
-//		}
-//	}
-
-	lastMethodCalled = 3;
+	if( lastMethodCalled != 3 ){
+		synchronize_complete(threadpool);
+		lastMethodCalled = 3;
+	}
 
 	Document* doc = DocumentConstructor();
 	doc->doc_id = doc_id;
@@ -586,9 +575,6 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	DocumentHandlerNode* dn = (DocumentHandlerNode*)malloc(sizeof(DocumentHandlerNode));
 	dn->doc_id = doc->doc_id;
 	lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentHandler), dn );
-
-	//fprintf( stderr, "DocumentHandler[%d] added\n", dn->doc_id );
-
 
 	return EC_SUCCESS;
 }
@@ -607,14 +593,9 @@ ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_
 	docResults->pop_back();
 	pthread_mutex_unlock( &mutex_doc_results );
 
-	//fprintf( stderr, "getNextResult tid[%d]\n", dr.docid );
-
     // get the docResult from the back of the list if any and return it
 	*p_doc_id=0; *p_num_res=0; *p_query_ids=0;
-	//if(docResults->empty()) return EC_NO_AVAIL_RES;
 	*p_doc_id=dr.docid; *p_num_res=dr.sz; *p_query_ids=dr.qids;
-
-	//fprintf( stderr, "getNextResult tid[%d]\n", dr.docid );
 
 	return EC_SUCCESS;
 }
@@ -813,9 +794,7 @@ void lp_threadpool_destroy(lp_threadpool* pool){
 }
 void synchronize_threads_master(int tid, void * arg){
     lp_threadpool* pool = (lp_threadpool*)arg;
-
 	//fprintf( stderr, "thread[%d] entered synchronization\n", tid );
-
 	pthread_barrier_wait( &pool->pool_barrier );
 	//fprintf( stderr, ":: thread[%d] exited synchronization\n", tid );
 }
@@ -826,14 +805,11 @@ void lp_threadpool_synchronize_master(lp_threadpool* pool){
 	synchronize_threads_master(0, (void*)pool);
 }
 void synchronize_complete(lp_threadpool* pool){
-
 	pthread_mutex_lock( &pool->mutex_pool );
-
 	while( pool->synced_threads < pool->nthreads ){
         pthread_cond_wait( &pool->sleep, &pool->mutex_pool );
         //fprintf( stderr, "sunchronize_complete: synced_threads[%d]\n", pool->synced_threads );
 	}
-
     pthread_mutex_unlock( &pool->mutex_pool );
 }
 
@@ -921,9 +897,6 @@ TrieNode* TrieFindID( TrieNode* root, const char* word, char word_sz, unsigned i
 	   }
 	   if( found && root->qids ){
 	       // WE HAVE A MATCH SO get the List of the query ids and add them to the result
-//		   for( unsigned int k=0,sz=root->qids->size(); k<sz; k++ )
-//			   if( root->qids->at(k).qid == query_id && root->qids->at(k).pos == pos )
-//				   return root;
 		   for( QueryArrayList::iterator f=root->qids->begin(), ff=root->qids->end(); f!=ff; f++ ){
 			   if( f->qid == query_id && f->pos == pos )
 			       return root;
@@ -994,7 +967,6 @@ void TrieHammingSearchWord( TrieNode* created_index_node, TrieNode* node, const 
 					SparseArraySet( doc->query_ids, it->qid, it->pos );
 					qn.pos = it->pos;
 					qn.qid = it->qid;
-					//index_qids->push_back(qn);
 					created_index_node->qids->push_back( qn );
 					pthread_mutex_lock( &querySet->at(qn.qid)->mutex_indexdb_nodes );
 					querySet->at(qn.qid)->indexdb_nodes[qn.pos]->push_back( created_index_node );
@@ -1453,7 +1425,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 			cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA-1;
 			sa->num_nodes++;
 			//if( sa->num_nodes % 2 == 1 ){
-			if( sa->num_nodes & 1 == 1 ){
+			if( (sa->num_nodes & 1) == 1 ){
 				// we must increase the mid_high
 				unsigned int i=0,sz=(sa->num_nodes >> 2);
 				for( prev=sa->head; i < sz ; i++ ){
@@ -1486,7 +1458,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 			cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA - 1;
 			sa->num_nodes++;
 			//if (sa->num_nodes % 2 == 1) {
-			if (sa->num_nodes & 1 == 1) {
+			if ((sa->num_nodes & 1) == 1) {
 				// we must increase the mid_high
 				unsigned int i = 0, sz=(sa->num_nodes >> 2);
 				for (prev = sa->head; i < sz; i++) {
@@ -1524,6 +1496,15 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 }
 
 // worker_thread functions
+
+
+void* start_query_worker( int tid, void* args ){
+
+
+
+	return 0;
+}
+
 
 void* FinishingJob( int tid, void* args ){
 	// it is assumed that this document finished processing
