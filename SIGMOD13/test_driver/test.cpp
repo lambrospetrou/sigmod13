@@ -95,6 +95,7 @@ void TestSigmod(const char* test_file_str)
 		{
 			for(i=0;i<num_cur_results;i++)
 			{
+				//continue;
 				unsigned int doc_id=0;
 				unsigned int num_res=0;
 				unsigned int* query_ids=0;
@@ -284,7 +285,7 @@ void TestSigmod(const char* test_file_str)
 
 int main(int argc, char* argv[])
 {
-	if(argc<=1) TestSigmod("./test_data/big_test.txt");
+	if(argc<=1) TestSigmod("./test_data/small_test.txt");
 	else TestSigmod(argv[1]);
 	return 0;
 }
