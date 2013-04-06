@@ -43,8 +43,8 @@
 #define NUM_THREADS 23
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 300
-#define SPARSE_ARRAY_NODE_DATA 4096 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 200
+#define SPARSE_ARRAY_NODE_DATA 16535 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
@@ -319,9 +319,13 @@ ErrorCode InitializeIndex(){
     documents.push_back((Document*)malloc(sizeof(Document))); // add dummy doc
 
     querySet = new QuerySet();
+    querySet->resize( 64000 );
+    querySet->clear();
     // add dummy query to start from index 1 because query ids start from 1 instead of 0
     querySet->push_back((QuerySetNode*)malloc(sizeof(QuerySetNode)));
     docResults = new DocResults();
+    docResults->resize(64000);
+    docResults->clear();
 
     for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
     	db_income.queries[i].resize( 64000 );
@@ -821,6 +825,8 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
    }
    if( !node->qids ){
        node->qids = new QueryArrayList();
+       node->qids->resize( 128 );
+       node->qids->clear();
    }
    QueryNode qn;
    qn.qid = qid;
@@ -1593,6 +1599,8 @@ void* TrieSearchWord( int tid, void* args ){
         		//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
 
                 created_index_node->query_nodes = new QueryNodesList();
+                created_index_node->query_nodes->resize( 128 );
+                created_index_node->query_nodes->clear();
 
                 update_index_node = 1;
 
