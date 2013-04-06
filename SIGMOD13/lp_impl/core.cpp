@@ -130,6 +130,7 @@ struct SparseArrayNode{
 	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS];
 	unsigned int low;
 	unsigned int high;
+	char valid[ SPARSE_ARRAY_NODE_DATA ];
 };
 struct SparseArray{
 	SparseArrayNode* head;
@@ -394,7 +395,12 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
     qnode->words_num = 0;
 
     pthread_mutex_lock( &mutex_query_set );
-    querySet->push_back(qnode); // add the new query in the query set - still unfinished though
+    unsigned int sz = querySet->size();
+    if( sz <= query_id ){
+    	querySet->resize( 2*query_id );
+    }
+    //querySet->push_back(qnode); // add the new query in the query set - still unfinished though
+    querySet->at( query_id ) = qnode;
     pthread_mutex_unlock( &mutex_query_set );
 
     int trie_index=0;
@@ -1382,6 +1388,7 @@ SparseArrayNode* SparseArrayNode_Constructor(){
 		n->high = n->low + SPARSE_ARRAY_NODE_DATA-1;
 		memset( n->data, 0, SPARSE_ARRAY_NODE_DATA*MAX_QUERY_WORDS );
 		n->next = n->prev = 0;
+		memset( n->valid, 0, SPARSE_ARRAY_NODE_DATA );
 		return n;
 }
 SparseArray* SparseArray_Constructor(){
@@ -1469,6 +1476,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 
 
 	// cnode holds the block where we need to insert the value
+	cnode->valid[ index - cnode->low ] = 1;
 	cnode->data[ index - cnode->low ][pos] = 1;
 	//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
 }
@@ -1480,9 +1488,11 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 	SparseArrayNode*cnode = array->head;
 	for( ; cnode ; cnode = cnode->next ){
 		for( int i=0; i<SPARSE_ARRAY_NODE_DATA; i++ ){
+			if( !cnode->valid[i] )
+				continue;
 			row = cnode->low + i;
 			pos = cnode->data[ i ][0] + cnode->data[ i ][1] + cnode->data[ i ][2] + cnode->data[ i ][3] + cnode->data[ i ][4];
-			if( row < nids && row > 0 && pos == querySet->at(row)->words_num ){
+			if( pos == querySet->at(row)->words_num ){
 				//fprintf( stderr, "row[%u]\n",  row );
                 final_ids[ total_found++ ] = row;
 			}
