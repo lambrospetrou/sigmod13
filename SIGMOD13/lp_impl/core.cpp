@@ -43,7 +43,7 @@
 #define NUM_THREADS 23
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 100
+#define WORDS_PROCESSED_BY_THREAD 300
 #define SPARSE_ARRAY_NODE_DATA 4096 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
@@ -322,6 +322,11 @@ ErrorCode InitializeIndex(){
     // add dummy query to start from index 1 because query ids start from 1 instead of 0
     querySet->push_back((QuerySetNode*)malloc(sizeof(QuerySetNode)));
     docResults = new DocResults();
+
+    for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
+    	db_income.queries[i].resize( 64000 );
+        db_income.queries[i].clear();
+    }
 
     // Initialize the threadpool
     threadpool = lp_threadpool_init( NUM_THREADS );
@@ -1588,6 +1593,8 @@ void* TrieSearchWord( int tid, void* args ){
         		//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
 
                 created_index_node->query_nodes = new QueryNodesList();
+
+                update_index_node = 1;
 
 				// Search the QueryDB and find the matches for the current word
 				TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
