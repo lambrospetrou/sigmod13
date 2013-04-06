@@ -286,9 +286,19 @@ void err_mem(char* msg){
    exit(1);
 }
 
+
+
+
+
+
+
 /********************************************************************************************
  *  GLOBALS END
  ********************************************************************************************/
+
+
+
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1580,27 +1590,27 @@ void* TrieSearchWord( int tid, void* args ){
 
                 created_index_node->query_nodes = new QueryNodesList();
 
-                update_index_node = 1;
+                //update_index_node = 1;
 
 				// Search the QueryDB and find the matches for the current word
-//				TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
-//				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
-//				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
-//				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
-//				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
-//					if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-//						continue;
-//					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
-//					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
-//					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
-//				}
-//
-//				// mark the indexes as fully checked
-//				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
-//				    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-//				    	continue;
-//				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
-//				}
+				TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
+				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
+				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
+				TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
+				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
+					if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
+						continue;
+					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
+					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
+					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
+				}
+
+				// mark the indexes as fully checked
+				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
+				    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
+				    	continue;
+				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
+				}
 
         	}else{
 				// we found the word in the index so we just take the results and insert them into the doc
@@ -1738,8 +1748,12 @@ void* DocumentHandler( int tid, void* args ){
 	DocumentHandlerNode* doch = ((DocumentHandlerNode*)args);
     Document *document = documents[doch->doc_id];
 
+
+//    fprintf( stderr, "handling doc[%d] [%d]\n", doch->doc_id, documents[doch->doc_id]->doc_id );
+
     unsigned int total_jobs = 0;
 	unsigned int batch_words=0;
+	    //int total_words=0;
 		TrieSearchData *tsd = NULL;
 		const char *start, *end;
 		char sz;
@@ -1751,11 +1765,14 @@ void* DocumentHandler( int tid, void* args ){
 	    	while( *end >= 'a' && *end <= 'z' ) end++;
 	    	sz = end-start;
 
+
 	    	// skip word if found before in the document
 	    	if( TrieVisitedIS( document->visited, start, sz ) ){
 	    		//fprintf( stderr, "doc[%d] word[%.*s] existed\n", doc_id, sz, start );
 	    	   	continue;
 	    	}
+
+	    	//total_words++;
 
 	        batch_words++;
 	    	if( batch_words == 1 ){
@@ -1788,10 +1805,14 @@ void* DocumentHandler( int tid, void* args ){
 	pthread_mutex_lock( &document->mutex_finished_jobs );
 	document->total_jobs = total_jobs;
 	if( document->total_jobs == document->finished_jobs ){
-	    document->total_jobs = -1;
-		lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), doch );
-	}
+				document->total_jobs = -1;
+				//fprintf( stderr, "[%d]", doch->doc_id );
+				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), doch );
+			}
 	pthread_mutex_unlock( &document->mutex_finished_jobs );
+
+
+
 
 	return 0;
 }
