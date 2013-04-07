@@ -1827,14 +1827,14 @@ void* TrieSearchWord( int tid, void* args ){
         					        	}
         					        	min = (min < matrix[x][y])?min:matrix[x][y];
         					        }
-        					        sss += y-x;
-        					        sss = (sss<0)?-sss:sss;
-        					        if( min + sss < iq.match_dist ){
-        					        	early_correct = 1;
-        					        	break;
-        					        }
+//        					        sss += y-x;
+//        					        sss = (sss<0)?-sss:sss;
+//        					        if( min + sss < iq.match_dist ){
+//        					        	early_correct = 1;
+//        					        	break;
+//        					        }
         					    }
-        					    if( !early_correct && matrix[x-1][y-1] > iq.match_dist ){
+        					    if( /*!early_correct &&*/ matrix[x-1][y-1] > iq.match_dist ){
         					    	valid = 0;
         					    }
         					    if( valid ){
@@ -1848,19 +1848,29 @@ void* TrieSearchWord( int tid, void* args ){
         		}
 
             	// FILL DOCUMENT with QUERY IDS matching this word
-    			pthread_mutex_lock(&doc->mutex_query_ids);
-                // insert the necessary qids inside the doc
-    			for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
-    				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
-    					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
-    				}
-    			}
-    			pthread_mutex_unlock(&doc->mutex_query_ids);
+//    			pthread_mutex_lock(&doc->mutex_query_ids);
+//                // insert the necessary qids inside the doc
+//    			for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+//    				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
+//    					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
+//    				}
+//    			}
+//    			pthread_mutex_unlock(&doc->mutex_query_ids);
 
     			// set the state of this income_queries as completely checked
     			created_index_node->income_index[low_sz] = income_indexes[low_sz];
 
         	}// end for each low_sz income
+
+        	// FILL DOCUMENT with QUERY IDS matching this word
+			pthread_mutex_lock(&doc->mutex_query_ids);
+            // insert the necessary qids inside the doc
+			for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
+					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
+				}
+			}
+			pthread_mutex_unlock(&doc->mutex_query_ids);
 
         }// end if update_index
 
