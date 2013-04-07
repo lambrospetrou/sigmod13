@@ -67,12 +67,23 @@ struct QueryNode{
 };
 typedef std::vector<QueryNode> QueryArrayList;
 
+struct TrieEditNode{
+   TrieEditNode* children[VALID_CHARS];
+   pthread_mutex_t mutex_node;
+   char costs[MAX_WORD_LENGTH+1];
+   char min_cost;
+};
+struct TrieEditHelper{
+	char previous[MAX_WORD_LENGTH+1];
+};
+
 struct TrieNode{
    TrieNode* children[VALID_CHARS];
    QueryArrayList *qids;
    pthread_mutex_t mutex_node;
    char wsz;
    unsigned int income_pos;
+   TrieEditNode* edit_tries;
 };
 
 struct TrieSet{
@@ -130,7 +141,6 @@ struct SparseArrayNode{
 	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 	unsigned int low;
 	unsigned int high;
-	//char valid[ SPARSE_ARRAY_NODE_DATA ];
 };
 struct SparseArray{
 	SparseArrayNode* head;
@@ -382,13 +392,6 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 		synchronize_complete(threadpool);
 		lastMethodCalled = 1;
 	}
-
-//	StartQueryNode *sqn = (StartQueryNode*)malloc( sizeof(StartQueryNode) );
-//    sqn->match_dist = match_dist;
-//    sqn->match_type = match_type;
-//    sqn->query_id = query_id;
-//    strcpy( sqn->start, query_str );
-//    lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(start_query_worker), sqn );
 
 	   int i,j;
 
@@ -1066,6 +1069,68 @@ TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char*
    }
    return node;
 }
+
+TrieEditNode* TrieEditNode_Constructor(){
+   TrieEditNode* n = (TrieEditNode*)malloc(sizeof(TrieEditNode));
+   if( !n ) err_mem("error allocating TrieEditNode");
+   memset( n->children, 0, VALID_CHARS*sizeof(TrieEditNode*) );
+   pthread_mutex_init( &n->mutex_node, NULL );
+   for( char i=0; i<MAX_WORD_LENGTH+1; i++ ){
+	   n->costs[i] = i;
+   }
+   return n;
+}
+void TrieEditNode_Destructor( TrieEditNode* node ){
+    for( char i=0; i<VALID_CHARS; i++ ){
+    	if( node->children[i] != 0 ){
+            TrieEditNode_Destructor( node->children[i] );
+    	}
+    }
+    pthread_mutex_destroy( &node->mutex_node );
+    free( node );
+}
+char TrieEditCalculateCost( TrieEditNode *node, char *qw, char qwsz, char *dw, char dwsz ){
+    char cost;
+    // navigate as far as the document word being matched is valid
+    char p, i, levels=0;
+    for( p=0; p<dwsz; p++ ){
+ 	   i = dw[p] -'a';
+ 	   if( node->children[i] != 0 ){
+            node = node->children[i];
+            levels++;
+ 	   }else{
+ 		   break;
+ 	   }
+    }
+    // now node holds the cost for the prefix of document word matched and now we must calculate the rest of the word
+    if( levels == dwsz ){
+    	// we found the results already so just return them
+    	return node->costs[dwsz];
+    }
+
+    char cost_insert, cost_delete, cost_subst;
+    TrieEditNode *previous;
+    // we must calculate the rest of the word edit distance
+    for( p=levels; p<dwsz; p++ ){
+    	previous = node;
+    	node->children[ dw[p]-'a' ] = TrieEditNode_Constructor();
+    	node = node->children[ dw[p]-'a' ];
+    	node->costs[0] = levels;
+    	for( i=1; i<dwsz; i++ ){
+    		if( qw[i] == dw[i] ){
+    			node->costs[i] = previous->costs[i-1];
+    		}else{
+    			cost_insert = node->costs[i-1] + 1;
+    			cost_delete = previous->costs[ i ] + 1;
+    			cost_subst = previous->costs[i-1] + 1;
+    			node->costs[i] = MIN3( cost_insert, cost_delete, cost_subst );
+    		}
+    	}
+    }
+
+    return node->costs[dwsz];
+}
+
 
 /*void TrieUpdateQueryHamming( TrieNode* node, const char* word, int word_sz, char maxCost, TrieNode* created_indexdb_node){
 	HammingNode current, n;
