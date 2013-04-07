@@ -40,11 +40,11 @@
 #include <algorithm>
 
 //////////////////////////////////////////
-#define NUM_THREADS 23
+#define NUM_THREADS 35
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 100
-#define SPARSE_ARRAY_NODE_DATA 4096 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 200
+#define SPARSE_ARRAY_NODE_DATA 16535 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
@@ -127,10 +127,10 @@ struct TrieNodeVisited{
 struct SparseArrayNode{
 	SparseArrayNode* next;
 	SparseArrayNode* prev;
-	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS];
+	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 	unsigned int low;
 	unsigned int high;
-	char valid[ SPARSE_ARRAY_NODE_DATA ];
+	//char valid[ SPARSE_ARRAY_NODE_DATA ];
 };
 struct SparseArray{
 	SparseArrayNode* head;
@@ -383,12 +383,127 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 		lastMethodCalled = 1;
 	}
 
-	StartQueryNode *sqn = (StartQueryNode*)malloc( sizeof(StartQueryNode) );
-    sqn->match_dist = match_dist;
-    sqn->match_type = match_type;
-    sqn->query_id = query_id;
-    strcpy( sqn->start, query_str );
-    lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(start_query_worker), sqn );
+//	StartQueryNode *sqn = (StartQueryNode*)malloc( sizeof(StartQueryNode) );
+//    sqn->match_dist = match_dist;
+//    sqn->match_type = match_type;
+//    sqn->query_id = query_id;
+//    strcpy( sqn->start, query_str );
+//    lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(start_query_worker), sqn );
+
+	   int i,j;
+
+		QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
+		qnode->type = match_type;
+		qnode->words = (TrieNode**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
+	    qnode->words_num = 0;
+
+	    int trie_index=0;
+		switch( match_type ){
+		case MT_EXACT_MATCH:
+			trie_index = 0;
+		   break;
+		case MT_HAMMING_DIST:
+			trie_index = 1;
+		   break;
+		case MT_EDIT_DIST:
+			trie_index = 5;
+		   break;
+		}// end of match_type
+		if( match_type != MT_EXACT_MATCH ){
+			switch (match_dist) {
+			case 0:
+				trie_index += 0;
+				break;
+			case 1:
+				trie_index += 1;
+				break;
+			case 2:
+				trie_index += 2;
+				break;
+			case 3:
+				trie_index += 3;
+				break;
+			}// end of match_dist
+		}
+
+		char qwords[MAX_QUERY_WORDS][MAX_WORD_LENGTH+1];
+		qwords[0][0] = qwords[1][0] = qwords[2][0] = qwords[3][0] = qwords[4][0] = '\0';
+
+	    int wsz;
+	    char found;
+		const char *start, *end;
+		IncomeQuery income;
+		for( start=query_str; *start; start = end ){
+			while( *start == ' ' ) start++;
+			end = start;
+			while( *end >= 'a' && *end <= 'z' ) end++;
+			wsz = end - start;
+			// check if the word appeared before
+	        found = 0;
+	        for( i=0; i<MAX_QUERY_WORDS; i++ ){
+	        	for( j=0; j<wsz; j++ ){
+	        		if( qwords[i][j]!=start[j] ){
+	        			break;
+	        		}
+	        	}
+	        	if( j==wsz && qwords[i][j]=='\0' ){
+	        		found = 1;
+	        		break;
+	        	}
+	        }
+	        if( found ) continue;
+	        else{
+	        	for( i=0; i<wsz; i++ )
+	        		qwords[qnode->words_num][i] = start[i];
+	        	qwords[qnode->words_num][wsz] = '\0';
+	        }
+
+	        ///////////////////////////////////////////////////
+	        // START PROCESSING NEW WORD FOR QUERY
+	        ///////////////////////////////////////////////////
+
+	        int current_word_index = qnode->words_num;
+
+	        // insert the query word inside the QueryDB
+	        TrieNode *querydb_node = TrieInsert(db_query.tries[wsz].tries[trie_index], start, wsz, query_id, current_word_index);
+	        qnode->words[current_word_index] = querydb_node;
+	        unsigned int qids_sz = querydb_node->qids->size();
+
+
+	    //	if( qids_sz > 1 ){
+	    	    // DO NOTHING SINCE THE WORD ALREADY EXISTS AND THIS MEANS THAT ANY DOCUMENT WORD
+	    		// THAT MATCHES THIS WORD AND THIS METHOD ALREADY HAS A REFERENCE TO THE
+	    		// QUERY_DB TRIENODE OF THIS WORD
+	    //	}else{
+	        if( qids_sz <= 1 ){
+	    		// JUST ADD THE NEW TRIENODE INSIDE THE INCOME_QUERIES
+
+	    		// possible optimization if instead of holding IncomeQuery structures, to hold pointer to structures
+	    		// to avoid copying the whole structure each time
+
+	    		income.match_dist = match_dist;
+	    		income.match_type = match_type;
+	    		income.query_node = querydb_node;
+	    		income.wsz = wsz;
+	    		for( i=0; i<wsz; i++ ){
+	    			income.word[i] = start[i];
+	    		}
+
+	    		// lock it when it will be parallel
+	    		db_income.queries[wsz].push_back( income );
+	    		querydb_node->wsz = wsz;
+	    		querydb_node->income_pos = db_income.queries[wsz].size()-1; // we inform the querydb_node where the word is located inside the IncomeQueries
+	    	}
+	        ///////////////////////////////////////////////////
+	        // end PROCESSING NEW WORD FOR QUERY
+	        ///////////////////////////////////////////////////
+
+			qnode->words_num++;
+
+		}// end for each word
+
+	    querySet->push_back(qnode); // add the new query in the query set - still unfinished though
+
 
 	return EC_SUCCESS;
 }
@@ -1271,9 +1386,8 @@ SparseArrayNode* SparseArrayNode_Constructor(){
 	SparseArrayNode* n = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
 		n->low = 0;
 		n->high = n->low + SPARSE_ARRAY_NODE_DATA-1;
-		memset( n->data, 0, SPARSE_ARRAY_NODE_DATA*MAX_QUERY_WORDS );
+		memset( n->data, 0, SPARSE_ARRAY_NODE_DATA*(MAX_QUERY_WORDS+1) );
 		n->next = n->prev = 0;
-		memset( n->valid, 0, SPARSE_ARRAY_NODE_DATA );
 		return n;
 }
 SparseArray* SparseArray_Constructor(){
@@ -1361,7 +1475,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 
 
 	// cnode holds the block where we need to insert the value
-	cnode->valid[ index - cnode->low ] = 1;
+	cnode->data[ index - cnode->low ][MAX_QUERY_WORDS] = 1;
 	cnode->data[ index - cnode->low ][pos] = 1;
 	//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
 }
@@ -1373,7 +1487,7 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 	SparseArrayNode*cnode = array->head;
 	for( ; cnode ; cnode = cnode->next ){
 		for( int i=0; i<SPARSE_ARRAY_NODE_DATA; i++ ){
-			if( !cnode->valid[i] )
+			if( !cnode->data[ i ][MAX_QUERY_WORDS] )
 				continue;
 			row = cnode->low + i;
 			pos = cnode->data[ i ][0] + cnode->data[ i ][1] + cnode->data[ i ][2] + cnode->data[ i ][3] + cnode->data[ i ][4];
@@ -1612,7 +1726,7 @@ void* TrieSearchWord( int tid, void* args ){
                 created_index_node->query_nodes->resize( 128 );
                 created_index_node->query_nodes->clear();
 
-                update_index_node = 1;
+                //update_index_node = 1;
 
 				// Search the QueryDB and find the matches for the current word
 				TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
@@ -1649,7 +1763,9 @@ void* TrieSearchWord( int tid, void* args ){
 			// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
 			// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
 			// THIS WORD WAS PROCESSED. exact, hamming and edit matching
-        	char valid;
+        	char valid, early_correct;
+        	char min=MAX_WORD_LENGTH;
+        	char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
         	for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
         		if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
         			continue;
@@ -1657,6 +1773,7 @@ void* TrieSearchWord( int tid, void* args ){
         		if( created_index_node->income_index[low_sz] < income_indexes[low_sz] ){
         			for( k=created_index_node->income_index[low_sz], ksz=income_indexes[low_sz]; k<ksz; k++ ){
         				valid = 1;
+        				early_correct = 0;
         				IncomeQuery &iq = db_income.queries[low_sz].at(k);
         				// make the calculations according to the query type
         				switch( iq.match_type ){
@@ -1695,8 +1812,7 @@ void* TrieSearchWord( int tid, void* args ){
         				}
         				case MT_EDIT_DIST:
         				{
-        					char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
-
+        					int sss = wsz - iq.wsz;
         					    matrix[0][0] = 0;
         					    for (x = 1; x <= wsz; x++)
         					        matrix[x][0] = matrix[x-1][0] + 1;
@@ -1709,10 +1825,16 @@ void* TrieSearchWord( int tid, void* args ){
         					        	}else{
         					        		matrix[x][y] = MIN3(matrix[x][y-1] + 1, matrix[x-1][y] + 1, matrix[x-1][y-1] + 1);
         					        	}
+        					        	min = (min < matrix[x][y])?min:matrix[x][y];
         					        }
-
+        					        sss += y-x;
+        					        sss = (sss<0)?-sss:sss;
+        					        if( min + sss < iq.match_dist ){
+        					        	early_correct = 1;
+        					        	break;
+        					        }
         					    }
-        					    if( matrix[x-1][y-1] > iq.match_dist ){
+        					    if( !early_correct && matrix[x-1][y-1] > iq.match_dist ){
         					    	valid = 0;
         					    }
         					    if( valid ){
