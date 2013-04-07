@@ -935,13 +935,10 @@ void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, c
 		if (current.tcost <= maxCost) {
 			if (word_sz == current.depth && current.node->qids != 0) {
 				// ADD THE node->qids[] INTO THE RESULTS
-				   //pthread_mutex_lock( &doc->mutex_query_ids );
 				   created_index_node->query_nodes->push_back(current.node);
 				   for (QueryArrayList::iterator it = current.node->qids->begin(), end = current.node->qids->end(); it != end; it++) {
-					 //  SparseArraySet( doc->query_ids, it->qid, it->pos );
 					   localqids.push_back( *it );
 					}
-				   //pthread_mutex_unlock( &doc->mutex_query_ids );
 			} else if (word_sz > current.depth) {
 				for (j = 0; j < VALID_CHARS; j++) {
 					if (current.node->children[j] != 0) {
@@ -1006,13 +1003,10 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
         }
         if( current[word_sz] <= maxCost && c.node->qids!=0 ){
             // ADD THE node->qids[] INTO THE RESULTS
-			   //pthread_mutex_lock( &doc->mutex_query_ids );
 			   created_index_node->query_nodes->push_back(c.node);
 			   for (QueryArrayList::iterator it = c.node->qids->begin(), end = c.node->qids->end(); it != end; it++) {
-				 //  SparseArraySet( doc->query_ids, it->qid, it->pos );
 				   localqids.push_back( *it );
 				}
-			   //pthread_mutex_unlock( &doc->mutex_query_ids );
         }
 
         // if there are more changes available recurse
@@ -1337,12 +1331,22 @@ TrieNodeVisited* TrieNodeVisited_Constructor(){
    return n;
 }
 void TrieNodeVisited_Destructor( TrieNodeVisited* node ){
-    for( char i=0; i<VALID_CHARS; i++ ){
-    	if( node->children[i] != 0 ){
-            TrieNodeVisited_Destructor( node->children[i] );
-    	}
-    }
-    free( node );
+	std::vector<TrieNodeVisited*> stack;
+	unsigned int stack_size=1;
+	stack.push_back( node );
+	TrieNodeVisited* cnode;
+	while( stack_size > 0 ){
+		stack_size--;
+		cnode = stack.back();
+		stack.pop_back();
+	    for( char i=0; i<VALID_CHARS; i++ ){
+	    	if( cnode->children[i] != 0 ){
+	            stack.push_back(cnode->children[i]);
+	            stack_size++;
+	    	}
+	    }
+	    free( cnode );
+	}
 }
 char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
 	// Returns 0 if new word added or 1 if existed
@@ -1516,7 +1520,6 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 }
 
 // worker_thread functions
-
 
 void* start_query_worker( int tid, void* args ){
 	StartQueryNode *sqn = (StartQueryNode*)args;
@@ -1723,24 +1726,15 @@ void* TrieSearchWord( int tid, void* args ){
         pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
         pthread_mutex_lock( &created_index_node->mutex_node );
-//query_nodes = 0;
+
         if( (query_nodes= created_index_node->query_nodes) == 0 ){
 
             // WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
-        	//pthread_mutex_lock( &created_index_node->mutex_node );
-
-        	// recheck one more time and avoid making calculations if another thread did it while checking the if statement
-        	//query_nodes = created_index_node->query_nodes;
-//query_nodes = 0;
-        	//if( query_nodes == 0 ){
-
         		//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
 
                 created_index_node->query_nodes = new QueryNodesList();
                 created_index_node->query_nodes->resize( 128 );
                 created_index_node->query_nodes->clear();
-
-                //update_index_node = 1;
 
 				// Search the QueryDB and find the matches for the current word
 				TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
@@ -1753,19 +1747,16 @@ void* TrieSearchWord( int tid, void* args ){
 					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
 					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
 					TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
+					// mark the indexes as fully checked
+					created_index_node->income_index[low_sz] = income_indexes[low_sz];
 				}
 
 				// mark the indexes as fully checked
-				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
-				    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-				    	continue;
-				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
-				}
-
-        	//}else{
-				// we found the word in the index so we just take the results and insert them into the doc
-        		//update_index_node = 1;
-        	//}
+//				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
+//				    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
+//				    	continue;
+//				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
+//				}
 
         }else{
         	// we found the word in the index so we just take the results and insert them into the doc
@@ -1777,7 +1768,7 @@ void* TrieSearchWord( int tid, void* args ){
 			// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
 			// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
 			// THIS WORD WAS PROCESSED. exact, hamming and edit matching
-        	char valid, early_correct;
+        	char valid;
         	char min=MAX_WORD_LENGTH;
         	char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
         	for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
@@ -1787,7 +1778,6 @@ void* TrieSearchWord( int tid, void* args ){
         		if( created_index_node->income_index[low_sz] < income_indexes[low_sz] ){
         			for( k=created_index_node->income_index[low_sz], ksz=income_indexes[low_sz]; k<ksz; k++ ){
         				valid = 1;
-        				early_correct = 0;
         				IncomeQuery &iq = db_income.queries[low_sz].at(k);
         				// make the calculations according to the query type
         				switch( iq.match_type ){
@@ -1826,8 +1816,6 @@ void* TrieSearchWord( int tid, void* args ){
         				}
         				case MT_EDIT_DIST:
         				{
-        					if( iq.wsz - wsz <= iq.match_dist || wsz - iq.wsz <= iq.match_dist ){
-        					    int sss = wsz - iq.wsz;
         					    matrix[0][0] = 0;
         					    for (x = 1; x <= wsz; x++)
         					        matrix[x][0] = matrix[x-1][0] + 1;
@@ -1842,17 +1830,10 @@ void* TrieSearchWord( int tid, void* args ){
         					        	}
         					        	min = (min < matrix[x][y])?min:matrix[x][y];
         					        }
-//        					        sss += y-x;
-//        					        sss = (sss<0)?-sss:sss;
-//        					        if( min + sss < iq.match_dist ){
-//        					        	early_correct = 1;
-//        					        	break;
-//        					        }
         					    }
-        					    if( /*!early_correct &&*/ matrix[x-1][y-1] > iq.match_dist ){
+        					    if( matrix[x-1][y-1] > iq.match_dist ){
         					    	valid = 0;
         					    }
-        					}
         			        if( valid ){
         				     	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
         					   	created_index_node->query_nodes->push_back(iq.query_node);
@@ -1863,16 +1844,6 @@ void* TrieSearchWord( int tid, void* args ){
         			}
         		}
 
-            	// FILL DOCUMENT with QUERY IDS matching this word
-//    			pthread_mutex_lock(&doc->mutex_query_ids);
-//                // insert the necessary qids inside the doc
-//    			for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
-//    				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
-//    					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
-//    				}
-//    			}
-//    			pthread_mutex_unlock(&doc->mutex_query_ids);
-
     			// set the state of this income_queries as completely checked
     			created_index_node->income_index[low_sz] = income_indexes[low_sz];
 
@@ -1880,7 +1851,6 @@ void* TrieSearchWord( int tid, void* args ){
 
         	// FILL DOCUMENT with QUERY IDS matching this word
 			pthread_mutex_lock(&doc->mutex_query_ids);
-            // insert the necessary qids inside the doc
 			for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
 				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
 					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
