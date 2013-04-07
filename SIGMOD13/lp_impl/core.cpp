@@ -1705,20 +1705,20 @@ void* TrieSearchWord( int tid, void* args ){
 
         pthread_mutex_lock( &db_index.tries[wsz]->mutex_node );
         TrieNodeIndex *created_index_node = TrieIndexCreateEmptyIfNotExists( db_index.tries[wsz], w, wsz );
-        QueryNodesList *query_nodes = created_index_node->query_nodes;
+        QueryNodesList *query_nodes;// = created_index_node->query_nodes;
         pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
         pthread_mutex_lock( &created_index_node->mutex_node );
 //query_nodes = 0;
-        if( query_nodes == 0 ){
+        if( (query_nodes= created_index_node->query_nodes) == 0 ){
 
             // WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
         	//pthread_mutex_lock( &created_index_node->mutex_node );
 
         	// recheck one more time and avoid making calculations if another thread did it while checking the if statement
-        	query_nodes = created_index_node->query_nodes;
+        	//query_nodes = created_index_node->query_nodes;
 //query_nodes = 0;
-        	if( query_nodes == 0 ){
+        	//if( query_nodes == 0 ){
 
         		//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
 
@@ -1748,10 +1748,10 @@ void* TrieSearchWord( int tid, void* args ){
 				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
 				}
 
-        	}else{
+        	//}else{
 				// we found the word in the index so we just take the results and insert them into the doc
-        		update_index_node = 1;
-        	}
+        		//update_index_node = 1;
+        	//}
 
         }else{
         	// we found the word in the index so we just take the results and insert them into the doc
