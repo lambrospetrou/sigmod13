@@ -905,7 +905,7 @@ void TrieExactSearchWord( TrieNodeIndex* created_index_node,TrieNode* root, cons
 }
 void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
 	//fprintf( stderr, "[2] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
-
+    QueryArrayList localqids;
 	HammingNode current, n;
 	std::vector<HammingNode> hamming_stack;
 	unsigned int stack_size=0;
@@ -935,12 +935,13 @@ void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, c
 		if (current.tcost <= maxCost) {
 			if (word_sz == current.depth && current.node->qids != 0) {
 				// ADD THE node->qids[] INTO THE RESULTS
-				   pthread_mutex_lock( &doc->mutex_query_ids );
+				   //pthread_mutex_lock( &doc->mutex_query_ids );
 				   created_index_node->query_nodes->push_back(current.node);
 				   for (QueryArrayList::iterator it = current.node->qids->begin(), end = current.node->qids->end(); it != end; it++) {
-					   SparseArraySet( doc->query_ids, it->qid, it->pos );
+					 //  SparseArraySet( doc->query_ids, it->qid, it->pos );
+					   localqids.push_back( *it );
 					}
-				   pthread_mutex_unlock( &doc->mutex_query_ids );
+				   //pthread_mutex_unlock( &doc->mutex_query_ids );
 			} else if (word_sz > current.depth) {
 				for (j = 0; j < VALID_CHARS; j++) {
 					if (current.node->children[j] != 0) {
@@ -955,10 +956,17 @@ void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, c
 			}
 		}
 	}
+
+	   pthread_mutex_lock( &doc->mutex_query_ids );
+	   for (QueryArrayList::iterator it = localqids.begin(), end = localqids.end(); it != end; it++) {
+		   SparseArraySet( doc->query_ids, it->qid, it->pos );
+		}
+	   pthread_mutex_unlock( &doc->mutex_query_ids );
+
 }
 void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
 	//fprintf( stderr, "[3] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, node, word_sz, word, maxCost, results );
-
+    QueryArrayList localqids;
     EditNode c, n;
     char current[MAX_WORD_LENGTH+1];
     std::vector<EditNode> edit_stack;
@@ -998,12 +1006,13 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
         }
         if( current[word_sz] <= maxCost && c.node->qids!=0 ){
             // ADD THE node->qids[] INTO THE RESULTS
-			   pthread_mutex_lock( &doc->mutex_query_ids );
+			   //pthread_mutex_lock( &doc->mutex_query_ids );
 			   created_index_node->query_nodes->push_back(c.node);
 			   for (QueryArrayList::iterator it = c.node->qids->begin(), end = c.node->qids->end(); it != end; it++) {
-				   SparseArraySet( doc->query_ids, it->qid, it->pos );
+				 //  SparseArraySet( doc->query_ids, it->qid, it->pos );
+				   localqids.push_back( *it );
 				}
-			   pthread_mutex_unlock( &doc->mutex_query_ids );
+			   //pthread_mutex_unlock( &doc->mutex_query_ids );
         }
 
         // if there are more changes available recurse
@@ -1023,6 +1032,11 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
 			}// there is no possible match further
 		}
 	}
+	   pthread_mutex_lock( &doc->mutex_query_ids );
+	   for (QueryArrayList::iterator it = localqids.begin(), end = localqids.end(); it != end; it++) {
+		   SparseArraySet( doc->query_ids, it->qid, it->pos );
+		}
+	   pthread_mutex_unlock( &doc->mutex_query_ids );
 }
 
 TrieNodeIndex* TrieNodeIndex_Constructor(){
@@ -1812,7 +1826,8 @@ void* TrieSearchWord( int tid, void* args ){
         				}
         				case MT_EDIT_DIST:
         				{
-        					int sss = wsz - iq.wsz;
+        					if( iq.wsz - wsz <= iq.match_dist || wsz - iq.wsz <= iq.match_dist ){
+        					    int sss = wsz - iq.wsz;
         					    matrix[0][0] = 0;
         					    for (x = 1; x <= wsz; x++)
         					        matrix[x][0] = matrix[x-1][0] + 1;
@@ -1837,10 +1852,11 @@ void* TrieSearchWord( int tid, void* args ){
         					    if( /*!early_correct &&*/ matrix[x-1][y-1] > iq.match_dist ){
         					    	valid = 0;
         					    }
-        					    if( valid ){
-        					    	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
-        					    	created_index_node->query_nodes->push_back(iq.query_node);
-        					    }
+        					}
+        			        if( valid ){
+        				     	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
+        					   	created_index_node->query_nodes->push_back(iq.query_node);
+        					}
         					break;
         				}
         				}
