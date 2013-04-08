@@ -73,8 +73,11 @@ struct TrieEditNode{
    char costs[MAX_WORD_LENGTH+1];
    char min_cost;
 };
-struct TrieEditHelper{
-	char previous[MAX_WORD_LENGTH+1];
+struct TrieCacheNode{
+	TrieCacheNode *children[VALID_CHARS];
+	char wsz;
+	unsigned int income_pos;
+	TrieEditNode *edit_tries;
 };
 
 struct TrieNode{
@@ -83,7 +86,6 @@ struct TrieNode{
    pthread_mutex_t mutex_node;
    char wsz;
    unsigned int income_pos;
-   TrieEditNode* edit_tries;
 };
 
 struct TrieSet{
@@ -114,6 +116,7 @@ typedef std::vector<QuerySetNode*> QuerySet;
 
 struct IncomeQuery{
 	TrieNode* query_node;
+	TrieCacheNode* cache_edit_node;
 	char word[MAX_WORD_LENGTH];
 	char wsz;
 	MatchType match_type;
@@ -124,7 +127,7 @@ struct IncomeQueryDB{
 };
 
 struct TrieSearchData{
-	const char* words[WORDS_PROCESSED_BY_THREAD];
+	char* words[WORDS_PROCESSED_BY_THREAD];
 	char words_sz[WORDS_PROCESSED_BY_THREAD];
 	short words_num;
 	DocID doc_id;
@@ -224,6 +227,7 @@ std::vector<Document*> documents;
 pthread_mutex_t mutex_query_set = PTHREAD_MUTEX_INITIALIZER;
 QuerySet *querySet; // std::vector<QuerySetNode*>
 
+TrieCacheNode *cache_edit_distance;
 QueryDB db_query;
 IndexDB db_index;
 IncomeQueryDB db_income;
@@ -265,6 +269,13 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
 TrieNodeIndex* TrieNodeIndex_Constructor();
 void TrieNodeIndex_Destructor( TrieNodeIndex* node );
 TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char* word, char word_sz );
+
+TrieCacheNode* TrieCacheNode_Constructor();
+void TrieCacheNode_Destructor( TrieCacheNode *node );
+TrieCacheNode* TrieCacheInsert( TrieCacheNode* node, const char* word, char word_sz);
+TrieEditNode* TrieEditNode_Constructor();
+void TrieEditNode_Destructor( TrieEditNode* node );
+char TrieEditCalculateCost( TrieEditNode *node, char *qw, char qwsz, char *dw, char dwsz );
 
 TrieNodeVisited* TrieNodeVisited_Constructor();
 void TrieNodeVisited_Destructor( TrieNodeVisited* node );
@@ -329,6 +340,8 @@ ErrorCode InitializeIndex(){
 
     documents.push_back((Document*)malloc(sizeof(Document))); // add dummy doc
 
+    cache_edit_distance = TrieCacheNode_Constructor();
+
     querySet = new QuerySet();
     querySet->resize( 64000 );
     querySet->clear();
@@ -388,7 +401,7 @@ ErrorCode DestroyIndex(){
 ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_type, unsigned int match_dist)
 {
 	// if the last call was match document then wait for the jobs to finish
-	if( lastMethodCalled != 1 ){
+	if( lastMethodCalled == 3 ){
 		synchronize_complete(threadpool);
 		lastMethodCalled = 1;
 	}
@@ -436,6 +449,7 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	    char found;
 		const char *start, *end;
 		IncomeQuery income;
+		TrieCacheNode *cache;
 		for( start=query_str; *start; start = end ){
 			while( *start == ' ' ) start++;
 			end = start;
@@ -496,6 +510,12 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	    		db_income.queries[wsz].push_back( income );
 	    		querydb_node->wsz = wsz;
 	    		querydb_node->income_pos = db_income.queries[wsz].size()-1; // we inform the querydb_node where the word is located inside the IncomeQueries
+	    		if( match_type == MT_EDIT_DIST ){
+	    			cache = TrieCacheInsert(cache_edit_distance, start, wsz );
+	    		    cache->wsz = wsz;
+	    		    cache->income_pos = querydb_node->income_pos;
+	    		    db_income.queries[wsz].back().cache_edit_node = cache;
+	    		}
 	    	}
 	        ///////////////////////////////////////////////////
 	        // end PROCESSING NEW WORD FOR QUERY
@@ -517,7 +537,7 @@ ErrorCode EndQuery(QueryID query_id)
 {
 
 	// if the last call was match document then wait for the jobs to finish
-		if( lastMethodCalled != 2 ){
+		if( lastMethodCalled == 3 ){
 			synchronize_complete(threadpool);
 			lastMethodCalled = 2;
 		}
@@ -983,7 +1003,7 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
 			stack_size++;
 		}
 	}
-
+    char cost;
 	//while( !edit_stack.empty() ){
 	while( stack_size > 0 ){
 		c = edit_stack.back();
@@ -1070,6 +1090,37 @@ TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char*
    return node;
 }
 
+TrieCacheNode* TrieCacheNode_Constructor(){
+    TrieCacheNode *n = (TrieCacheNode *)malloc(sizeof(TrieCacheNode));
+    memset( n->children, 0, VALID_CHARS*sizeof(TrieCacheNode*) );
+    n->edit_tries = 0;
+    n->income_pos = 0;
+    n->wsz = 0;
+    return n;
+}
+void TrieCacheNode_Destructor( TrieCacheNode *node ){
+    for( char i=0; i<VALID_CHARS; i++ ){
+    	if( node->children[i] != 0 ){
+            TrieCacheNode_Destructor( node->children[i] );
+    	}
+    }
+    free( node );
+}
+TrieCacheNode* TrieCacheInsert( TrieCacheNode* node, const char* word, char word_sz){
+   char ptr=0;
+   char pos;
+   while( ptr < word_sz ){
+      pos = word[ptr] - 'a';
+      if( node->children[pos] == 0 ){
+         node->children[pos] = TrieCacheNode_Constructor();
+      }
+      node = node->children[pos];
+      ptr++;
+   }
+   if( !node->edit_tries )
+	   node->edit_tries = TrieEditNode_Constructor();
+   return node;
+}
 TrieEditNode* TrieEditNode_Constructor(){
    TrieEditNode* n = (TrieEditNode*)malloc(sizeof(TrieEditNode));
    if( !n ) err_mem("error allocating TrieEditNode");
@@ -1090,45 +1141,39 @@ void TrieEditNode_Destructor( TrieEditNode* node ){
     free( node );
 }
 char TrieEditCalculateCost( TrieEditNode *node, char *qw, char qwsz, char *dw, char dwsz ){
-    char cost;
+
+	//fprintf( stderr, "qw[%.*s] qwsz[%d] dw[%.*s] dwsz[%d]\n", qwsz, qw, qwsz, dwsz, dw, dwsz );
+
     // navigate as far as the document word being matched is valid
-    char p, i, levels=0;
-    for( p=0; p<dwsz; p++ ){
- 	   i = dw[p] -'a';
- 	   if( node->children[i] != 0 ){
-            node = node->children[i];
-            levels++;
- 	   }else{
- 		   break;
- 	   }
+	TrieEditNode *next;
+	char cost_insert, cost_delete, cost_subst;
+	char p, i, letter=0;
+    char ptr=0;
+    char pos;
+    while( ptr < dwsz ){
+       pos = dw[ptr] - 'a';
+       pthread_mutex_lock( &node->mutex_node );
+       if( node->children[pos] == 0 ){
+          next = node->children[pos] = TrieEditNode_Constructor();
+          next->costs[0] = node->costs[0] + 1;
+              	for( i=1; i<=qwsz; i++ ){
+              		if( qw[i-1] == dw[ptr] ){
+              			next->costs[i] = node->costs[i-1];
+              		}else{
+              			cost_insert = next->costs[i-1] + 1;
+              			cost_delete = node->costs[i] + 1;
+              			cost_subst = node->costs[i-1] + 1;
+              			next->costs[i] = MIN3( cost_insert, cost_delete, cost_subst );
+              		}
+              	}
+       }
+       pthread_mutex_unlock( &node->mutex_node );
+       node = node->children[pos];
+       ptr++;
     }
+
     // now node holds the cost for the prefix of document word matched and now we must calculate the rest of the word
-    if( levels == dwsz ){
-    	// we found the results already so just return them
-    	return node->costs[dwsz];
-    }
-
-    char cost_insert, cost_delete, cost_subst;
-    TrieEditNode *previous;
-    // we must calculate the rest of the word edit distance
-    for( p=levels; p<dwsz; p++ ){
-    	previous = node;
-    	node->children[ dw[p]-'a' ] = TrieEditNode_Constructor();
-    	node = node->children[ dw[p]-'a' ];
-    	node->costs[0] = levels;
-    	for( i=1; i<dwsz; i++ ){
-    		if( qw[i] == dw[i] ){
-    			node->costs[i] = previous->costs[i-1];
-    		}else{
-    			cost_insert = node->costs[i-1] + 1;
-    			cost_delete = previous->costs[ i ] + 1;
-    			cost_subst = previous->costs[i-1] + 1;
-    			node->costs[i] = MIN3( cost_insert, cost_delete, cost_subst );
-    		}
-    	}
-    }
-
-    return node->costs[dwsz];
+    return node->costs[qwsz];
 }
 
 
@@ -1586,145 +1631,6 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 
 // worker_thread functions
 
-void* start_query_worker( int tid, void* args ){
-	StartQueryNode *sqn = (StartQueryNode*)args;
-	MatchType match_type = sqn->match_type;
-	char match_dist = sqn->match_dist;
-    const char *query_str = sqn->start;
-    unsigned int query_id = sqn->query_id;
-    int i,j;
-
-	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
-	qnode->type = match_type;
-	qnode->words = (TrieNode**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
-    qnode->words_num = 0;
-
-    int trie_index=0;
-	switch( match_type ){
-	case MT_EXACT_MATCH:
-		trie_index = 0;
-	   break;
-	case MT_HAMMING_DIST:
-		trie_index = 1;
-	   break;
-	case MT_EDIT_DIST:
-		trie_index = 5;
-	   break;
-	}// end of match_type
-	if( match_type != MT_EXACT_MATCH ){
-		switch (match_dist) {
-		case 0:
-			trie_index += 0;
-			break;
-		case 1:
-			trie_index += 1;
-			break;
-		case 2:
-			trie_index += 2;
-			break;
-		case 3:
-			trie_index += 3;
-			break;
-		}// end of match_dist
-	}
-
-	char qwords[MAX_QUERY_WORDS][MAX_WORD_LENGTH+1];
-	qwords[0][0] = qwords[1][0] = qwords[2][0] = qwords[3][0] = qwords[4][0] = '\0';
-
-    int wsz;
-    char found;
-	const char *start, *end;
-	for( start=query_str; *start; start = end ){
-		while( *start == ' ' ) start++;
-		end = start;
-		while( *end >= 'a' && *end <= 'z' ) end++;
-		wsz = end - start;
-		// check if the word appeared before
-        found = 0;
-        for( i=0; i<MAX_QUERY_WORDS; i++ ){
-        	for( j=0; j<wsz; j++ ){
-        		if( qwords[i][j]!=start[j] ){
-        			break;
-        		}
-        	}
-        	if( j==wsz && qwords[i][j]=='\0' ){
-        		found = 1;
-        		break;
-        	}
-        }
-        if( found ) continue;
-        else{
-        	for( i=0; i<wsz; i++ )
-        		qwords[qnode->words_num][i] = start[i];
-        	qwords[qnode->words_num][wsz] = '\0';
-        }
-
-        ///////////////////////////////////////////////////
-        // START PROCESSING NEW WORD FOR QUERY
-        ///////////////////////////////////////////////////
-
-        int current_word_index = qnode->words_num;
-
-        // insert the query word inside the QueryDB
-        pthread_mutex_lock( &db_query.tries[wsz].tries[trie_index]->mutex_node );
-        TrieNode *querydb_node = TrieInsert(db_query.tries[wsz].tries[trie_index], start, wsz, query_id, current_word_index);
-        qnode->words[current_word_index] = querydb_node;
-        unsigned int qids_sz = querydb_node->qids->size();
-        pthread_mutex_unlock( &db_query.tries[wsz].tries[trie_index]->mutex_node );
-
-
-    	if( qids_sz > 1 ){
-    	    // DO NOTHING SINCE THE WORD ALREADY EXISTS AND THIS MEANS THAT ANY DOCUMENT WORD
-    		// THAT MATCHES THIS WORD AND THIS METHOD ALREADY HAS A REFERENCE TO THE
-    		// QUERY_DB TRIENODE OF THIS WORD
-    	}else{
-    		// JUST ADD THE NEW TRIENODE INSIDE THE INCOME_QUERIES
-
-    		// possible optimization if instead of holding IncomeQuery structures, to hold pointer to structures
-    		// to avoid copying the whole structure each time
-
-    		IncomeQuery income;
-    		income.match_dist = match_dist;
-    		income.match_type = match_type;
-    		income.query_node = querydb_node;
-    		income.wsz = wsz;
-    		for( i=0; i<wsz; i++ ){
-    			income.word[i] = start[i];
-    		}
-
-    		// lock it when it will be parallel
-    		pthread_mutex_lock( &mutex_dbincome );
-    		db_income.queries[wsz].push_back( income );
-    		unsigned int income_pos = db_income.queries[wsz].size();
-    		pthread_mutex_unlock( &mutex_dbincome );
-    		querydb_node->wsz = wsz;
-    		querydb_node->income_pos = income_pos-1; // we inform the querydb_node where the word is located inside the IncomeQueries
-    	}
-        ///////////////////////////////////////////////////
-        // end PROCESSING NEW WORD FOR QUERY
-        ///////////////////////////////////////////////////
-
-		qnode->words_num++;
-
-	    pthread_mutex_lock( &mutex_query_set );
-	    unsigned int sz = querySet->size();
-	    if( sz <= query_id ){
-	    	querySet->resize( 2*query_id );
-	    }
-	    //querySet->push_back(qnode); // add the new query in the query set - still unfinished though
-	    querySet->at( query_id ) = qnode;
-	    pthread_mutex_unlock( &mutex_query_set );
-
-	}// end for each word
-
-
-
-	free( sqn );
-
-	return 0;
-}
-
-
 void* FinishingJob( int tid, void* args ){
 	// it is assumed that this document finished processing
 	DocumentHandlerNode* doch = ((DocumentHandlerNode*)args);
@@ -1763,7 +1669,7 @@ bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
 void* TrieSearchWord( int tid, void* args ){
 	TrieSearchData *tsd = (TrieSearchData *)args;
 	//fprintf( stderr, "words_num[%d] words[%p] words_sz[%p]\n", tsd->words_num, tsd->words, tsd->words_sz );
-	const char* w;
+	char* w;
 	char wsz;
 	Document *doc = documents[tsd->doc_id];
 
@@ -1816,13 +1722,6 @@ void* TrieSearchWord( int tid, void* args ){
 					created_index_node->income_index[low_sz] = income_indexes[low_sz];
 				}
 
-				// mark the indexes as fully checked
-//				for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
-//				    if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-//				    	continue;
-//				    created_index_node->income_index[low_sz] = income_indexes[low_sz];
-//				}
-
         }else{
         	// we found the word in the index so we just take the results and insert them into the doc
             update_index_node = 1;
@@ -1843,65 +1742,50 @@ void* TrieSearchWord( int tid, void* args ){
         		if( created_index_node->income_index[low_sz] < income_indexes[low_sz] ){
         			for( k=created_index_node->income_index[low_sz], ksz=income_indexes[low_sz]; k<ksz; k++ ){
         				valid = 1;
-        				IncomeQuery &iq = db_income.queries[low_sz].at(k);
+        				IncomeQuery *iq = &db_income.queries[low_sz].at(k);
         				// make the calculations according to the query type
-        				switch( iq.match_type ){
+        				switch( iq->match_type ){
         				case MT_EXACT_MATCH:
         				{
-                            if( iq.wsz != wsz ) continue; // next word
+                            if( iq->wsz != wsz ) continue; // next word
                             for( x=0; x<wsz;x++ ){
-                            	if( (iq.word[x] ^ w[x]) ){
+                            	if( (iq->word[x] ^ w[x]) ){
                             		valid = 0;
                             		break;
                             	}
                             }
                             if( valid ){
                             	//fprintf( stderr, "inserted![%.*s] doc_word[%.*s]\n", iq.wsz, iq.word, wsz, w );
-                            	created_index_node->query_nodes->push_back(iq.query_node);
+                            	created_index_node->query_nodes->push_back(iq->query_node);
                             }
         					break;
         				}
         				case MT_HAMMING_DIST:
         				{
-        					if( iq.wsz != wsz ) continue; // next word
+        					if( iq->wsz != wsz ) continue; // next word
         					char cost=0;
         					for( x=0; x<wsz;x++ ){
-        					   	if( (iq.word[x] ^ w[x]) ){
+        					   	if( (iq->word[x] ^ w[x]) ){
         					  		cost++;
-        					  		if( cost > iq.match_dist ){
+        					  		if( cost > iq->match_dist ){
         					   		    valid=0;
         					   		    break;
         					  		}
         					   	}
         					}
         					if( valid ){
-        						created_index_node->query_nodes->push_back(iq.query_node);
+        						created_index_node->query_nodes->push_back(iq->query_node);
         					}
         					break;
         				}
         				case MT_EDIT_DIST:
         				{
-        					    matrix[0][0] = 0;
-        					    for (x = 1; x <= wsz; x++)
-        					        matrix[x][0] = matrix[x-1][0] + 1;
-        					    for (y = 1; y <= iq.wsz; y++)
-        					        matrix[0][y] = matrix[0][y-1] + 1;
-        					    for (x = 1; x <= wsz; x++){
-        					        for (y = 1; y <= iq.wsz; y++){
-        					        	if( w[x-1] == iq.word[y-1] ){
-        					        		matrix[x][y] = matrix[x-1][y-1];
-        					        	}else{
-        					        		matrix[x][y] = MIN3(matrix[x][y-1] + 1, matrix[x-1][y] + 1, matrix[x-1][y-1] + 1);
-        					        	}
-        					        	min = (min < matrix[x][y])?min:matrix[x][y];
-        					        }
-        					    }
-        					    if( matrix[x-1][y-1] > iq.match_dist ){
-        					    	valid = 0;
-        					    }
+        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
+        						valid = 0;
+
         			        if( valid ){
         				     	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
-        					   	created_index_node->query_nodes->push_back(iq.query_node);
+        					   	created_index_node->query_nodes->push_back(iq->query_node);
         					}
         					break;
         				}
@@ -1960,7 +1844,7 @@ void* DocumentHandler( int tid, void* args ){
 	unsigned int batch_words=0;
 	    //int total_words=0;
 		TrieSearchData *tsd = NULL;
-		const char *start, *end;
+		char *start, *end;
 		char sz;
 	    for( start=document->doc; *start; start = end ){
 		    // FOR EACH WORD DO THE MATCHING
