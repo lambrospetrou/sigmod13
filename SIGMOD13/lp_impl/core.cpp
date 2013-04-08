@@ -48,6 +48,8 @@
 
 #define VALID_CHARS 26
 
+#define MAX( a, b ) ( ((a) >= (b))?(a):(b) )
+#define MIN( a, b ) ( ((a) < (b))?(a):(b) )
 #define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
 
 /***********************************************************
@@ -486,12 +488,6 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	        qnode->words[current_word_index] = querydb_node;
 	        unsigned int qids_sz = querydb_node->qids->size();
 
-
-	    //	if( qids_sz > 1 ){
-	    	    // DO NOTHING SINCE THE WORD ALREADY EXISTS AND THIS MEANS THAT ANY DOCUMENT WORD
-	    		// THAT MATCHES THIS WORD AND THIS METHOD ALREADY HAS A REFERENCE TO THE
-	    		// QUERY_DB TRIENODE OF THIS WORD
-	    //	}else{
 	        if( qids_sz <= 1 ){
 	    		// JUST ADD THE NEW TRIENODE INSIDE THE INCOME_QUERIES
 
@@ -1735,6 +1731,7 @@ void* TrieSearchWord( int tid, void* args ){
         	char valid;
         	char min=MAX_WORD_LENGTH;
         	char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
+        	//char matrix2[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
         	for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
         		if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
         			continue;
@@ -1783,33 +1780,101 @@ void* TrieSearchWord( int tid, void* args ){
 //        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
 //        						valid = 0;
 
-        					 matrix[0][0] = 0;
-							for (x = 1; x <= wsz; x++)
-								matrix[x][0] = matrix[x - 1][0] + 1;
-							for (y = 1; y <= iq->wsz; y++)
-								matrix[0][y] = matrix[0][y - 1] + 1;
-							for (x = 1; x <= wsz; x++) {
-								for (y = 1; y <= iq->wsz; y++) {
-									if (w[x - 1] == iq->word[y - 1]) {
-										matrix[x][y] = matrix[x - 1][y - 1];
-									} else {
-										matrix[x][y] = MIN3(matrix[x][y-1] + 1, matrix[x-1][y] + 1, matrix[x-1][y-1] + 1);
-									}
-									min = (min < matrix[x][y]) ?
-											min : matrix[x][y];
-								}
-							}
-							if (matrix[x - 1][y - 1] > iq->match_dist) {
-								valid = 0;
-							}
+//        					matrix2[0][0] = 0;
+//							for (y = 1; y <= iq->wsz; y++)
+//								matrix2[0][y] = y;
+//							for (x = 1; x <= wsz; x++) {
+//								matrix2[x][0] = x;
+//								for (y = 1; y <= iq->wsz; y++) {
+//									if (w[x - 1] == iq->word[y - 1]) {
+//										matrix2[x][y] = matrix2[x - 1][y - 1];
+//									} else {
+//										matrix2[x][y] = MIN3(matrix2[x][y-1] + 1, matrix2[x-1][y] + 1, matrix2[x-1][y-1] + 1);
+//									}
+//									min = (min < matrix2[x][y]) ?
+//											min : matrix2[x][y];
+//								}
+//								if( min > iq->match_dist ){
+//									valid = 0;
+//									break;
+//								}
+//							}
+//							//fprintf( stderr, "norm[%d]\n", matrix2[x - 1][y - 1] );
+//							if ( valid && matrix2[x-1][y-1] > iq->match_dist) {
+//								valid = 0;
+//							}
+
+							// OPTIMIZED EDIT DISTANCE FOR DIAGONAL CALCULATION ONLY
+        					char left, right;
+        					matrix[0][0] = 0;
+        					for( y=1; y<=iq->wsz; y++ ){
+        						matrix[0][y] = y;
+        					}
+        					for( x=1; x<=wsz; x++ ){
+        						matrix[x][0] = x;
+        					}
+        					// for each letter of the document word
+        					for( x=1; x<= wsz; x++ ){
+        						min = 50;
+        						left = x - iq->match_dist;
+        						left = MAX( 1, left );
+        						right = x + iq->match_dist;
+        						right = MIN( iq->wsz, right );
+        						if( right < iq->wsz )
+        							matrix[x][right+1] = 50;
+        						if( left > 1 ){
+        							matrix[x][left-1] = 50;
+        						}
+        						for( y=left; y<=right; y++ ){
+        							if( w[x-1] == iq->word[y-1] ){
+        								matrix[x][y] = matrix[x-1][y-1];
+        							}else{
+        								matrix[x][y] = MIN3( matrix[x-1][y-1], matrix[x-1][y], matrix[x][y-1] ) + 1;
+        							}
+        							min = MIN( min, matrix[x][y] );
+        						}
+        						// the word has already passed the threshold
+        						if( min > iq->match_dist ){
+        							fprintf( stderr, "rejected\n" );
+        							valid = 0;
+        							break;
+        						}
+        						// the document word has more characters than the query word
+        						if( x == iq->wsz ){
+        							fprintf( stderr, "1st if\n" );
+        							if( wsz - iq->wsz + min > iq->match_dist ){
+        								valid = 0;
+        								break;
+        							}else{
+        								fprintf( stderr, "opt[%d]\n", min );
+        								break;
+        							}
+        						}
+        						// the query word has more characters than document word
+        						if( x == wsz ){
+        							fprintf( stderr, "2nd if\n" );
+        							if( iq->wsz - wsz + min > iq->match_dist ){
+        								valid=0;
+        								break;
+        							}else{
+        								fprintf( stderr, "opt[%d]\n", min );
+        								break;
+        							}
+        						}
+        					}
+
+
+
+
 
         			        if( valid ){
+        			        	//fprintf( stderr, "inserted" );
         				     	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
         					   	created_index_node->query_nodes->push_back(iq->query_node);
         					}
         					break;
         				}
-        				}
+        				}// end of switch
         			}
         		}
 
