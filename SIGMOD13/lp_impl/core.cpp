@@ -510,12 +510,12 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 	    		db_income.queries[wsz].push_back( income );
 	    		querydb_node->wsz = wsz;
 	    		querydb_node->income_pos = db_income.queries[wsz].size()-1; // we inform the querydb_node where the word is located inside the IncomeQueries
-	    		if( match_type == MT_EDIT_DIST ){
-	    			cache = TrieCacheInsert(cache_edit_distance, start, wsz );
-	    		    cache->wsz = wsz;
-	    		    cache->income_pos = querydb_node->income_pos;
-	    		    db_income.queries[wsz].back().cache_edit_node = cache;
-	    		}
+//	    		if( match_type == MT_EDIT_DIST ){
+//	    			cache = TrieCacheInsert(cache_edit_distance, start, wsz );
+//	    		    cache->wsz = wsz;
+//	    		    cache->income_pos = querydb_node->income_pos;
+//	    		    db_income.queries[wsz].back().cache_edit_node = cache;
+//	    		}
 	    	}
 	        ///////////////////////////////////////////////////
 	        // end PROCESSING NEW WORD FOR QUERY
@@ -1780,8 +1780,28 @@ void* TrieSearchWord( int tid, void* args ){
         				}
         				case MT_EDIT_DIST:
         				{
-        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
-        						valid = 0;
+//        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
+//        						valid = 0;
+
+        					 matrix[0][0] = 0;
+							for (x = 1; x <= wsz; x++)
+								matrix[x][0] = matrix[x - 1][0] + 1;
+							for (y = 1; y <= iq->wsz; y++)
+								matrix[0][y] = matrix[0][y - 1] + 1;
+							for (x = 1; x <= wsz; x++) {
+								for (y = 1; y <= iq->wsz; y++) {
+									if (w[x - 1] == iq->word[y - 1]) {
+										matrix[x][y] = matrix[x - 1][y - 1];
+									} else {
+										matrix[x][y] = MIN3(matrix[x][y-1] + 1, matrix[x-1][y] + 1, matrix[x-1][y-1] + 1);
+									}
+									min = (min < matrix[x][y]) ?
+											min : matrix[x][y];
+								}
+							}
+							if (matrix[x - 1][y - 1] > iq->match_dist) {
+								valid = 0;
+							}
 
         			        if( valid ){
         				     	//fprintf( stderr, "inserted![%.*s] cost[%d] doc_word[%.*s]\n", iq.wsz, iq.word, matrix[x-1][y-1], wsz, w );
