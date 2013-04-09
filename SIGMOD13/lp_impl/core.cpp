@@ -44,7 +44,7 @@
 #define TOTAL_WORKERS NUM_THREADS+1
 
 #define WORDS_PROCESSED_BY_THREAD 200
-#define SPARSE_ARRAY_NODE_DATA 16535 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define SPARSE_ARRAY_NODE_DATA 12000 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
@@ -252,13 +252,13 @@ void synchronize_threads_master(int tid, void * arg);
 void lp_threadpool_synchronize_master(lp_threadpool* pool);
 void synchronize_complete(lp_threadpool* pool);
 
-SparseArrayNode* SparseArrayNode_Constructor();
+ SparseArrayNode* SparseArrayNode_Constructor();
 SparseArray* SparseArray_Constructor();
 void SparseArray_Destructor(SparseArray* n);
 void SparseArraySet( SparseArray* sa, unsigned int index, char pos );
 unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total);
 
-TrieNode* TrieNode_Constructor();
+ TrieNode* TrieNode_Constructor();
 void TrieNode_Destructor( TrieNode* node );
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos );
 TrieNode* TrieCreateEmptyIfNotExists( TrieNode* node, const char* word, char word_sz );
@@ -268,23 +268,23 @@ void TrieExactSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, con
 void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
 void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
 
-TrieNodeIndex* TrieNodeIndex_Constructor();
+ TrieNodeIndex* TrieNodeIndex_Constructor();
 void TrieNodeIndex_Destructor( TrieNodeIndex* node );
 TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char* word, char word_sz );
 
-TrieCacheNode* TrieCacheNode_Constructor();
+ TrieCacheNode* TrieCacheNode_Constructor();
 void TrieCacheNode_Destructor( TrieCacheNode *node );
 TrieCacheNode* TrieCacheInsert( TrieCacheNode* node, const char* word, char word_sz);
-TrieEditNode* TrieEditNode_Constructor();
+ TrieEditNode* TrieEditNode_Constructor();
 void TrieEditNode_Destructor( TrieEditNode* node );
 char TrieEditCalculateCost( TrieEditNode *node, char *qw, char qwsz, char *dw, char dwsz );
 
-TrieNodeVisited* TrieNodeVisited_Constructor();
+ TrieNodeVisited* TrieNodeVisited_Constructor();
 void TrieNodeVisited_Destructor( TrieNodeVisited* node );
 char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz );
 void TrieVisitedClear(TrieNodeVisited* node);
 
-Document* DocumentConstructor();
+ Document* DocumentConstructor();
 void DocumentDestructor( Document *doc );
 void DocumentDeallocate(Document *doc);
 
@@ -808,7 +808,7 @@ void synchronize_complete(lp_threadpool* pool){
 
 // TRIE FUNCTIONS
 
-TrieNode* TrieNode_Constructor(){
+ TrieNode* TrieNode_Constructor(){
    TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
    if( !n ) err_mem("error allocating TrieNode");
    n->qids = 0;
@@ -1052,7 +1052,7 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
 	   pthread_mutex_unlock( &doc->mutex_query_ids );
 }
 
-TrieNodeIndex* TrieNodeIndex_Constructor(){
+ TrieNodeIndex* TrieNodeIndex_Constructor(){
 	   TrieNodeIndex* n = (TrieNodeIndex*)malloc(sizeof(TrieNodeIndex));
 	   if( !n ) err_mem("error allocating TrieNodeIndex");
 	   n->query_nodes = 0;
@@ -1086,7 +1086,7 @@ TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char*
    return node;
 }
 
-TrieCacheNode* TrieCacheNode_Constructor(){
+ TrieCacheNode* TrieCacheNode_Constructor(){
     TrieCacheNode *n = (TrieCacheNode *)malloc(sizeof(TrieCacheNode));
     memset( n->children, 0, VALID_CHARS*sizeof(TrieCacheNode*) );
     n->edit_tries = 0;
@@ -1117,7 +1117,7 @@ TrieCacheNode* TrieCacheInsert( TrieCacheNode* node, const char* word, char word
 	   node->edit_tries = TrieEditNode_Constructor();
    return node;
 }
-TrieEditNode* TrieEditNode_Constructor(){
+ TrieEditNode* TrieEditNode_Constructor(){
    TrieEditNode* n = (TrieEditNode*)malloc(sizeof(TrieEditNode));
    if( !n ) err_mem("error allocating TrieEditNode");
    memset( n->children, 0, VALID_CHARS*sizeof(TrieEditNode*) );
@@ -1429,7 +1429,7 @@ void TrieUpdateEdit( TrieNode* node, const char* word, int word_sz, unsigned int
 
 // TRIE VISITED STRUCTURE END
 
-TrieNodeVisited* TrieNodeVisited_Constructor(){
+ TrieNodeVisited* TrieNodeVisited_Constructor(){
    TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
    if( !n ) err_mem("error allocating TrieNode");
    memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeVisited*) );
@@ -1481,7 +1481,7 @@ void TrieVisitedClear(TrieNodeVisited* node){
 
 //  DOCUMENT STRUCTURE
 
-Document* DocumentConstructor(){
+ Document* DocumentConstructor(){
     Document* doc = (Document*)malloc(sizeof(Document));
     doc->doc=(char*)malloc( MAX_DOC_LENGTH );
     doc->doc_id=0;
@@ -1506,7 +1506,7 @@ void DocumentDeallocate(Document *doc){
 
 // SPARSE ARRAY STRUCTURE
 
-SparseArrayNode* SparseArrayNode_Constructor(){
+ SparseArrayNode* SparseArrayNode_Constructor(){
 	SparseArrayNode* n = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
 		n->low = 0;
 		n->high = n->low + SPARSE_ARRAY_NODE_DATA-1;
@@ -1729,11 +1729,10 @@ void* TrieSearchWord( int tid, void* args ){
 			// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
 			// THIS WORD WAS PROCESSED. exact, hamming and edit matching
         	char valid;
-        	//char min=MAX_WORD_LENGTH;
         	//char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
-        	char *previous = (char*)malloc(MAX_WORD_LENGTH+1);
-        	char *current = (char*)malloc(MAX_WORD_LENGTH+1);
-        	//char matrix2[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
+        	char *previous, *current;
+        	char _previous[MAX_WORD_LENGTH+1];
+        	char _current[MAX_WORD_LENGTH+1];
         	for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
         		if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
         			continue;
@@ -1781,27 +1780,49 @@ void* TrieSearchWord( int tid, void* args ){
         				{
 //        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
 //        						valid = 0;
-                            char *t;
-        					previous[0] = 0;
-        					for( y=1; y<=iq->wsz; y++ )
-        						previous[y] = y;
-        					for (x = 1; x <= wsz; x++) {
-								current[0] = x;
-								for (y = 1; y <= iq->wsz; y++) {
-									if (w[x - 1] == iq->word[y - 1]) {
-										current[y] = previous[y - 1];
-									} else {
-										current[y] = MIN3(current[y-1] , previous[y], previous[y-1] ) + 1;
-									}
-								}
-                                t = previous;
-                                previous = current;
-                                current = t;
-							}
-        					if( previous[iq->wsz] <= iq->match_dist ){
-        						created_index_node->query_nodes->push_back(iq->query_node);
-        					}
 
+        					// normal calculation with only 2*M size
+//                            char *t;
+//                            previous = _previous;
+//                            current = _current;
+//        					previous[0] = 0;
+//        					for( y=1; y<=iq->wsz; y++ )
+//        						previous[y] = y;
+//        					for (x = 1; x <= wsz; x++) {
+//								current[0] = x;
+//								for (y = 1; y <= iq->wsz; y++) {
+//									if (w[x - 1] == iq->word[y - 1]) {
+//										current[y] = previous[y - 1];
+//									} else {
+//										current[y] = MIN3(current[y-1] , previous[y], previous[y-1] ) + 1;
+//									}
+//								}
+//                                t = previous;
+//                                previous = current;
+//                                current = t;
+//							}
+//        					if( previous[iq->wsz] <= iq->match_dist ){
+//        						created_index_node->query_nodes->push_back(iq->query_node);
+//        					}
+
+
+        					// normal calculation with a matrix N*M
+//        					matrix[0][0] = 0;
+//        					for( y=1; y<=iq->wsz; y++ )
+//        						matrix[0][y] = y;
+//        					for (x = 1; x <= wsz; x++) {
+//								matrix[x][0] = x;
+//								for (y = 1; y <= iq->wsz; y++) {
+//									if (w[x - 1] == iq->word[y - 1]) {
+//										matrix[x][y] = matrix[x-1][y - 1];
+//									} else {
+//										matrix[x][y] = MIN3(matrix[x][y-1] , matrix[x-1][y], matrix[x-1][y-1] ) + 1;
+//									}
+//								}
+//							}
+//        					if( matrix[x-1][iq->wsz] <= iq->match_dist ){
+//        						created_index_node->query_nodes->push_back(iq->query_node);
+//        					}
 
 							// OPTIMIZED EDIT DISTANCE FOR DIAGONAL CALCULATION ONLY
 //        					char left, right;
@@ -1814,10 +1835,8 @@ void* TrieSearchWord( int tid, void* args ){
 //        					}
 //        					// for each letter of the document word
 //        					for( x=1; x<= wsz; x++ ){
-//        						//left = x - 4;
-//        						left = MAX( 1, x-4 );
-//        						//right = x + 4;
-//        						right = MIN( iq->wsz, x+4 );
+//        						left = MAX( 1, x-iq->match_dist );
+//        						right = MIN( iq->wsz, x+iq->match_dist + 1 );
 //        						if( right < iq->wsz )
 //        							matrix[x][right+1] = 50;
 //        						if( left > 1 ){
@@ -1831,12 +1850,42 @@ void* TrieSearchWord( int tid, void* args ){
 //        							}
 //        						}
 //        					}
-
 //        			        if( matrix[ x-1 ][ y-1 ] <= iq->match_dist ){
-//        			        	//fprintf( stderr, "inserted" );
-//        				     	//fprintf( stderr, "inserted! [%.*s] cost[%d] doc_word[%.*s]\n", iq->wsz, iq->word, matrix[x-1][y-1], wsz, w );
 //        					   	created_index_node->query_nodes->push_back(iq->query_node);
 //        					}
+
+        					// OPTIMIZED DIAGONAL with 2 rows
+        					char left, right, *t;
+        					previous = _previous;
+        					current = _current;
+        					previous[0] = 0;
+        					for( y=1; y<=iq->wsz; y++ ){
+        						previous[y] = y;
+        						current[y] = 50;
+        					}
+        					// for each letter of the document word
+        					for( x=1; x<= wsz; x++ ){
+        						left = MAX( 1, x-iq->match_dist );
+        						right = MIN( iq->wsz, x+iq->match_dist + 1 );
+        						if( left > 1 )
+        						    current[left-1] = 50;
+        						else
+        							current[0] = x;
+        						for( y=left; y<=right; y++ ){
+        							if( w[x-1] == iq->word[y-1] ){
+        								current[y] = previous[y-1];
+        							}else{
+        								current[y] = MIN3( previous[y-1], previous[y], current[y-1] ) + 1;
+        							}
+        						}
+        						t = previous;
+        						previous = current;
+        						current = t;
+        					}
+        			        if( previous[ y-1 ] <= iq->match_dist ){
+        					   	created_index_node->query_nodes->push_back(iq->query_node);
+        					}
+
         					break;
         				}
         				}// end of switch
@@ -1847,9 +1896,6 @@ void* TrieSearchWord( int tid, void* args ){
     			created_index_node->income_index[low_sz] = income_indexes[low_sz];
 
         	}// end for each low_sz income
-
-        	free( previous );
-        	free( current );
 
         	// FILL DOCUMENT with QUERY IDS matching this word
 			pthread_mutex_lock(&doc->mutex_query_ids);
