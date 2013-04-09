@@ -40,11 +40,11 @@
 #include <algorithm>
 
 //////////////////////////////////////////
-#define NUM_THREADS 35
+#define NUM_THREADS 70
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 200
-#define SPARSE_ARRAY_NODE_DATA 12000 //13107 // 2^16 / 5 in order to fit in cache block 64K
+#define WORDS_PROCESSED_BY_THREAD 70
+#define SPARSE_ARRAY_NODE_DATA 8000 //13107 // 2^16 / 5 in order to fit in cache block 64K
 
 #define VALID_CHARS 26
 
@@ -1778,6 +1778,7 @@ void* TrieSearchWord( int tid, void* args ){
         				}
         				case MT_EDIT_DIST:
         				{
+
 //        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
 //        						valid = 0;
 
