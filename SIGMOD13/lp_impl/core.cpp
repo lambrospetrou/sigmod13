@@ -37,10 +37,10 @@
 #include <string>
 
 //////////////////////////////////////////
-#define NUM_THREADS 400
+#define NUM_THREADS 40
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 150
+#define WORDS_PROCESSED_BY_THREAD 70
 #define SPARSE_ARRAY_NODE_DATA 9000
 
 #define VALID_CHARS 26
@@ -160,7 +160,7 @@ struct lp_tpjob{
     lp_tpjob *next;
 };
 
-typedef struct{
+struct lp_threadpool{
    int workers_ids;
    int nthreads;
    int pending_jobs;
@@ -178,7 +178,7 @@ typedef struct{
 
    char headsTime;
 
-}lp_threadpool;
+};
 
 struct HammingNode{
 	TrieNode* node;
@@ -1381,8 +1381,6 @@ void* TrieSearchWord( int tid, void* args ){
 				}
 
         }else{
-
-        	std::unordered_map<std::pair<std::string,std::string>,int>::const_iterator it;
 
 			// TODO - update index
 			// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
