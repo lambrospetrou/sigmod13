@@ -33,13 +33,15 @@
 #include <pthread.h>
 
 #include <vector>
+#include <unordered_map>
+#include <string>
 
 //////////////////////////////////////////
 #define NUM_THREADS 400
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 30
-#define SPARSE_ARRAY_NODE_DATA 10000
+#define WORDS_PROCESSED_BY_THREAD 150
+#define SPARSE_ARRAY_NODE_DATA 9000
 
 #define VALID_CHARS 26
 
@@ -50,6 +52,7 @@
 /***********************************************************
  * STRUCTURES
  ***********************************************************/
+
 
 struct DocResultsNode{
 	DocID docid;
@@ -315,32 +318,28 @@ ErrorCode InitializeIndex(){
     documents.push_back((Document*)malloc(sizeof(Document))); // add dummy doc
 
     querySet = new QuerySet();
-    querySet->resize( 64000 );
+    querySet->resize( 16000 );
     querySet->clear();
     // add dummy query to start from index 1 because query ids start from 1 instead of 0
     querySet->push_back((QuerySetNode*)malloc(sizeof(QuerySetNode)));
     docResults = new DocResults();
-    docResults->resize(64000);
+    docResults->resize(16000);
     docResults->clear();
 
     for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
-		db_income.queries[i][0].resize(10000);
+		db_income.queries[i][0].resize(1000);
 		db_income.queries[i][0].clear();
-		db_income.queries[i][1].resize(10000);
-		db_income.queries[i][1].clear();
-		db_income.queries[i][2].resize(10000);
+		db_income.queries[i][2].resize(1000);
 		db_income.queries[i][2].clear();
-		db_income.queries[i][3].resize(10000);
+		db_income.queries[i][3].resize(1000);
 		db_income.queries[i][3].clear();
-		db_income.queries[i][4].resize(10000);
+		db_income.queries[i][4].resize(1000);
 		db_income.queries[i][4].clear();
-		db_income.queries[i][5].resize(10000);
-		db_income.queries[i][5].clear();
-		db_income.queries[i][6].resize(10000);
+		db_income.queries[i][6].resize(1000);
 		db_income.queries[i][6].clear();
-		db_income.queries[i][7].resize(10000);
+		db_income.queries[i][7].resize(1000);
 		db_income.queries[i][7].clear();
-		db_income.queries[i][8].resize(10000);
+		db_income.queries[i][8].resize(1000);
 		db_income.queries[i][8].clear();
     }
 
@@ -1316,11 +1315,11 @@ void* TrieSearchWord( int tid, void* args ){
 	unsigned int income_indexes[MAX_WORD_LENGTH+1][9];
 	for( unsigned int i=0; i<MAX_WORD_LENGTH+1; i++ ){
 		income_indexes[i][0] = db_income.queries[i][0].size();
-		income_indexes[i][1] = db_income.queries[i][1].size();
+		//income_indexes[i][1] = db_income.queries[i][1].size();
 		income_indexes[i][2] = db_income.queries[i][2].size();
 		income_indexes[i][3] = db_income.queries[i][3].size();
 		income_indexes[i][4] = db_income.queries[i][4].size();
-		income_indexes[i][5] = db_income.queries[i][5].size();
+		//income_indexes[i][5] = db_income.queries[i][5].size();
 		income_indexes[i][6] = db_income.queries[i][6].size();
 		income_indexes[i][7] = db_income.queries[i][7].size();
 		income_indexes[i][8] = db_income.queries[i][8].size();
@@ -1383,6 +1382,8 @@ void* TrieSearchWord( int tid, void* args ){
 
         }else{
 
+        	std::unordered_map<std::pair<std::string,std::string>,int>::const_iterator it;
+
 			// TODO - update index
 			// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
 			// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
@@ -1397,50 +1398,9 @@ void* TrieSearchWord( int tid, void* args ){
         			continue;
         		for( int dist_index=6; dist_index<9; dist_index++ ){
 					// check if we need to update the index word for queries with low_sz size words
-					if( created_index_node->income_index[low_sz][dist_index] < income_indexes[low_sz][dist_index] ){
 						for( k=created_index_node->income_index[low_sz][dist_index], ksz=income_indexes[low_sz][dist_index]; k<ksz; k++ ){
 							valid = 1;
 							IncomeQuery *iq = &db_income.queries[low_sz][dist_index].at(k);
-							// make the calculations according to the query type
-							/*switch( iq->match_type ){
-							case MT_EXACT_MATCH:
-							{
-								if( iq->wsz != wsz ) continue; // next word
-								for( x=0; x<wsz;x++ ){
-									if( (iq->word[x] ^ w[x]) ){
-										valid = 0;
-										break;
-									}
-								}
-								if( valid ){
-									//fprintf( stderr, "inserted![%.*s] doc_word[%.*s]\n", iq.wsz, iq.word, wsz, w );
-									created_index_node->query_nodes->push_back(iq->query_node);
-								}
-								break;
-							}
-							case MT_HAMMING_DIST:
-							{
-								if( iq->wsz != wsz ) continue; // next word
-								char cost=0;
-								for( x=0; x<wsz;x++ ){
-									if( (iq->word[x] ^ w[x]) ){
-										cost++;
-										if( cost > iq->match_dist ){
-											valid=0;
-											break;
-										}
-									}
-								}
-								if( valid ){
-									created_index_node->query_nodes->push_back(iq->query_node);
-								}
-								break;
-							}
-							case MT_EDIT_DIST:
-							{*/
-
-	//        					if( TrieEditCalculateCost( iq->cache_edit_node->edit_tries, iq->word, iq->wsz, w, wsz ) > iq->match_dist )
-	//        						valid = 0;
 
 								// normal calculation with only 2*M size
 	//                            char *t;
@@ -1516,6 +1476,8 @@ void* TrieSearchWord( int tid, void* args ){
 	//        					}
 
 								// OPTIMIZED DIAGONAL with 2 rows
+
+
 								char left, right, *t;
 								previous = _previous;
 								current = _current;
@@ -1547,44 +1509,32 @@ void* TrieSearchWord( int tid, void* args ){
 									created_index_node->query_nodes->push_back(iq->query_node);
 								}
 
-								//break;
-
-							//}// end of switch
 						}
-					}// end of current income query size check
-
+					// set the state of this income_queries as completely checked
         	        created_index_node->income_index[low_sz][dist_index] = income_indexes[low_sz][dist_index];
         		}// end of this distance edit
-    			// set the state of this income_queries as completely checked
-
-
         	}// end for each low_sz income
 
         	// check exact
-        	if( created_index_node->income_index[wsz][0] < income_indexes[wsz][0] ){
         		for( k=created_index_node->income_index[wsz][0], ksz=income_indexes[wsz][0]; k<ksz; k++ ){
-        		    valid = 1;
+        		    //valid = 1;
         			IncomeQuery *iq = &db_income.queries[wsz][0].at(k);
         			if( iq->wsz != wsz ) continue; // next word
 					for (x = 0; x < wsz; x++) {
 						if ((iq->word[x] ^ w[x])) {
-							valid = 0;
 							break;
 						}
 					}
-					if (valid) {
+					if ( x == wsz ) {
 						//fprintf( stderr, "inserted![%.*s] doc_word[%.*s]\n", iq.wsz, iq.word, wsz, w );
 						created_index_node->query_nodes->push_back(iq->query_node);
 					}
         		}
         		created_index_node->income_index[wsz][0] = income_indexes[wsz][0];
-        	}
 
         	// check hamming
         	for( unsigned int dist_index=2; dist_index<5; dist_index++ ){
-        		if( created_index_node->income_index[wsz][dist_index] < income_indexes[wsz][dist_index] ){
 					for (k = created_index_node->income_index[wsz][dist_index], ksz =income_indexes[wsz][dist_index]; k < ksz; k++) {
-						valid = 1;
 						IncomeQuery *iq = &db_income.queries[wsz][dist_index].at(k);
 						if( iq->wsz != wsz ) continue; // next word
 						char cost=0;
@@ -1592,17 +1542,15 @@ void* TrieSearchWord( int tid, void* args ){
 							if( (iq->word[x] ^ w[x]) ){
 								cost++;
 								if( cost > iq->match_dist ){
-									valid=0;
 									break;
 								}
 							}
 						}
-						if( valid ){
+						if( x == wsz ){
 							created_index_node->query_nodes->push_back(iq->query_node);
 						}
 					}
 					created_index_node->income_index[wsz][dist_index] = income_indexes[wsz][dist_index];
-				}
         	}
 
         	// FILL DOCUMENT with QUERY IDS matching this word
@@ -1625,6 +1573,9 @@ void* TrieSearchWord( int tid, void* args ){
 
 	}
 
+	// get the results for the nodes that got updated by other threads
+	// if they were locked previously it means that a thread in this MatchDocuments() batch
+	// updated them with the new queries
 	for( i=0; i<locked_nodes_num; i++ ){
 		created_index_node = locked_nodes[i];
 		pthread_mutex_lock( &created_index_node->mutex_node );

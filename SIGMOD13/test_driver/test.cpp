@@ -285,7 +285,7 @@ void TestSigmod(const char* test_file_str)
 
 int main(int argc, char* argv[])
 {
-	if(argc<=1) TestSigmod("./test_data/inter_test.txt");
+	if(argc<=1) TestSigmod("./test_data/big_test.txt");
 	else TestSigmod(argv[1]);
 	return 0;
 }

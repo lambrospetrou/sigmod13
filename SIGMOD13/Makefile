@@ -35,7 +35,7 @@ IMPL_O=lp_impl/core.o
 CC  = gcc
 CXX = g++
 #CFLAGS=-O3 -fPIC -Wall -g -I. -I./include
-CFLAGS=-O3 -fPIC -Wall -g -I. -I./include
+CFLAGS= -std=c++0x -O3 -fPIC -Wall -g -I. -I./include
 CXXFLAGS=$(CFLAGS) 
 LDFLAGS=-lpthread 
 
