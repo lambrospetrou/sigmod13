@@ -35,10 +35,10 @@
 #include <vector>
 
 //////////////////////////////////////////
-#define NUM_THREADS 24
+#define NUM_THREADS 400
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 100
+#define WORDS_PROCESSED_BY_THREAD 30
 #define SPARSE_ARRAY_NODE_DATA 9000
 
 #define VALID_CHARS 26
@@ -1306,36 +1306,30 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 				return false;
 			return a.pos <= b.pos;
 		}
-		int difference_one_distance_one(char *mikri,int length_mikri,int length_megali,char *megali)
-		{
-			int i=0;
-			if (mikri[0]!=megali[0])
-			{for (i=0;i<length_mikri;i++)
-				if (mikri[i]!=megali[i+1])
-					return 0;
-				return 1;
-			}
-			else if (mikri[length_mikri-1]!=megali[length_megali-1])
-			{
-				for (i=0;i<length_mikri;i++)
-					if (mikri[i]!=megali[i])
-						return 0;
-				return 1;
+int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
+                {
+                        int diff=1;
+                        int i=0;
+                        int j=0;
+                        for (i=0,j=0;i<length_mikri;i++,j++){
+                                if (mikri[i]==megali[j])
+                                        continue;
+                                else {
+                                        diff--;
+                                        if (diff==-1)
+                                                return 0;
+                                        else { i--;continue;}
+                                }
 
-			}
-			else {
-				int diff=0;
-				for (i=0;i<length_mikri;i++)
-					if (mikri[i]!=megali[i])
-					{
-						diff++;
-						if (diff==2)
-							return 0;
-					}
-				return 1;
+                        }
 
-			}
-		}
+		return 1;
+                }
+
+
+
+
+
 
 		int difference_three_distance_3(char *mikri,int length_mikri,char *megali)
 		{
@@ -1352,7 +1346,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 					else { i--;continue;}
 				}
 			}
-			return 1;
+		return 1;
 		}
 		int difference_two_distance_2(char *mikri,int length_mikri,char *megali)
 		{
@@ -1369,7 +1363,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 					else { i--;continue;}
 				}
 			}
-			return 1;
+	return 1;
 		}
 
 
@@ -1385,8 +1379,6 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 				}
 			return 1;
 		}
-
-
 
 		void* TrieSearchWord( int tid, void* args ){
 			TrieSearchData *tsd = (TrieSearchData *)args;
@@ -1489,6 +1481,148 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 							for( k=created_index_node->income_index[low_sz][dist_index], ksz=income_indexes[low_sz][dist_index]; k<ksz; k++ ){
 								valid = 1;
 								IncomeQuery *iq = &db_income.queries[low_sz][dist_index].at(k);
+								size1 = iq->wsz - wsz;
+
+
+
+
+
+								if ((size1==-3 || size1==3)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==2 || iq->match_dist==1))
+																{
+
+
+
+																//	printf("prosperna ");
+																	continue;
+
+
+
+																}
+																else if ((size1==-3 )&&iq->match_type==MT_EDIT_DIST && iq->match_dist==3)
+																{
+
+												if (difference_three_distance_3(iq->word,iq->wsz,w))//apothikefse ta apotelesmata kai mpla mpla kai sinexise
+								                                             { created_index_node->query_nodes->push_back(iq->query_node);
+														continue;}
+
+
+
+														else continue;}
+															//		difference_three_distance_3(iq->word,iq->wsz,w);
+
+											//					}
+																else if ((size1==3)&&iq->match_type==MT_EDIT_DIST && iq->match_dist==3)
+																{
+
+																	//if (difference_three_distance_3(w,wsz,iq->word)==1)//apothikefse ta apotelesmata kai mpla mpla kai sinexise
+																	//else continue;
+																if (difference_three_distance_3(w,wsz,iq->word))
+															{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                                continue;}
+
+
+
+								                                                else continue;}
+								//									printf("difference_three_distance_3");
+
+														//		}
+																else if ((size1==-2 || size1==2)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+																	continue;
+																else if ((size1==-2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
+																{
+																if (difference_two_distance_2(iq->word,iq->wsz,w))
+																{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                                continue;}
+
+
+
+								                                                else continue;}
+
+								//									printf("difference_two_distance_2");
+														//		}
+																else if ((size1==2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
+																{
+
+
+																if (difference_two_distance_2(w,wsz,iq->word))
+																{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                                continue;}
+
+
+
+								                                                else continue;}
+
+								//									printf("difference_two_distance_2");
+														//		}
+												//		else if((low_sz==1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+												//				{
+												//				if(difference_one_distance_one(w,wsz,iq->wsz,iq->word))
+												//				{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                  //              continue;}
+
+
+
+								                                    //            else continue;
+								//									printf("difference_one_distance_one");
+												//				}
+													//	else
+
+
+
+													if((size1==1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+								                                                                {
+								                                                if (difference_one_distance_one(w,wsz,iq->word))
+								                                                                { created_index_node->query_nodes->push_back(iq->query_node);
+								                                                                 continue;}
+								                                                else continue;
+
+								//                              //                                      printf("difference_one_distance_one");
+								                                                                }
+
+													if((size1==-1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+																{
+														if (difference_one_distance_one(iq->word,iq->wsz,w))
+																{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                       			         continue;}
+								                                                else continue;
+
+								//				//					printf("difference_one_distance_one");
+																}
+												//				else if((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+												//				{
+
+								//									printf("no_difference_distance_1");
+												//					if (iq->wsz<wsz)
+												//			{		if (no_difference_distance_1(iq->word, iq->wsz,w))
+												//					{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                  //              continue;}
+
+
+
+								                                    //            else continue;}
+												//					else{
+																	if ((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
+																{	if (no_difference_distance_1(w,wsz,iq->word))
+																	{ created_index_node->query_nodes->push_back(iq->query_node);
+								                                                continue;}
+
+
+
+								                                                else continue;}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 								//printf("low_sz : %d iq->match_type%d iq->match_dist : %d",low_sz,iq->match_type,iq->match_dist);
 
 								// normal calculation with only 2*M size
