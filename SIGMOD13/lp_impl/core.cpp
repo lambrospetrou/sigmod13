@@ -158,7 +158,7 @@ struct lp_tpjob{
 	lp_tpjob *next;
 };
 
-typedef struct{
+struct lp_threadpool{
 	int workers_ids;
 	int nthreads;
 	int pending_jobs;
@@ -176,7 +176,7 @@ typedef struct{
 
 	char headsTime;
 
-}lp_threadpool;
+};
 
 struct HammingNode{
 	TrieNode* node;
@@ -191,12 +191,179 @@ struct EditNode{
 	char letter;
 };
 
-struct StartQueryNode{
-	unsigned int query_id;
-	char start[MAX_QUERY_LENGTH+1];
-	MatchType match_type;
-	char match_dist;
+
+
+
+//////////////////////////////////////////////////////////////////////////
+// MEMMANAGER
+//////////////////////////////////////////////////////////////////////////
+
+struct raw_memnode{
+	raw_memnode* next;
+	char* data;
 };
+
+void* AllocateRawMemBlock( raw_memnode *raw_head, unsigned int size ){
+	char *n = ( char* )malloc( size );
+	raw_memnode *rn = (raw_memnode*)malloc( sizeof( raw_memnode ) );
+	rn->data = n;
+	rn->next = raw_head->next;
+	raw_head->next = rn;
+	return n;
+}
+
+void DeallocateRawMem( raw_memnode *raw_head ){
+	raw_memnode *n, *t;
+	for( n=raw_head->next; n; n=t ){
+		t = n->next;
+		free( n->data );
+		free( n );
+	}
+	//free( raw_head );
+}
+
+#define TYPE_SIZE_TPJOB 24
+#define TYPE_ID_TPJOB 1
+#define POOL_SIZE_TPJOB 10000
+
+#define TYPE_SIZE_TRIENODE 264
+#define TYPE_ID_TRIENODE 2
+#define POOL_SIZE_TRIENODE 100000
+
+struct memblock_tpjob{
+	char type_id;
+	lp_tpjob tpjob;
+	char isfree;
+	int block_size;
+	memblock_tpjob *next;
+};
+
+struct memblock_trienode{
+	char type_id;
+	TrieNode trienode;
+	char isfree;
+	int block_size;
+	memblock_trienode *next;
+};
+
+struct st_mempool{
+
+	// define the raw_memory container
+	raw_memnode raw_head;
+
+	// define the head nodes for the available blocks for each type
+	memblock_tpjob *head_tpjob;
+	memblock_trienode *head_trienode;
+};
+
+st_mempool* st_mempool_init(){
+	st_mempool *stp = (st_mempool*)malloc( sizeof( st_mempool ) );
+	stp->raw_head.next = 0;
+	stp->head_tpjob = 0;
+	stp->head_trienode = 0;
+	return stp;
+}
+
+void st_mempool_destroy( st_mempool *mempool ){
+	DeallocateRawMem( &mempool->raw_head );
+}
+
+void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
+	switch( type_id ){
+	case TYPE_ID_TPJOB:
+	{
+		memblock_tpjob *nblock, *prev = mempool->head_tpjob;
+		for( unsigned int i=0; i<POOL_SIZE_TPJOB; i++ ){
+			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
+			nblock = (memblock_tpjob*)((char*)base + i*sizeof(memblock_tpjob));
+			nblock->block_size = TYPE_SIZE_TPJOB;
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_TPJOB;
+			prev = nblock;
+		}
+		mempool->head_tpjob = prev;
+		break;
+	}
+	case TYPE_ID_TRIENODE:
+	{
+		memblock_trienode *nblock, *prev = mempool->head_trienode;
+		for( unsigned int i=0; i<POOL_SIZE_TRIENODE; i++ ){
+			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
+			nblock = (memblock_trienode*)((char*)base + i*sizeof(memblock_trienode));
+			nblock->block_size = TYPE_SIZE_TRIENODE;
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_TRIENODE;
+			prev = nblock;
+		}
+		mempool->head_trienode = prev;
+		break;
+	}
+	}// end of switch type
+}
+
+void* st_mempool_alloc( st_mempool* mempool, unsigned int size ){
+	switch( size ){
+	case TYPE_SIZE_TPJOB:
+	{
+		if( mempool->head_tpjob == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_tpjob) * POOL_SIZE_TPJOB );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_TPJOB );
+		}
+		memblock_tpjob *base = mempool->head_tpjob;
+		mempool->head_tpjob = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->tpjob;
+		break;
+	}
+	case TYPE_SIZE_TRIENODE:
+	{
+		if( mempool->head_trienode == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_trienode) * POOL_SIZE_TRIENODE );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_TRIENODE );
+		}
+		memblock_trienode *base = mempool->head_trienode;
+		mempool->head_trienode = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->trienode;
+		break;
+	}
+	}// END OF SWITCH
+	return 0;
+}
+
+void st_mempool_free( st_mempool *mempool, void *ptr ){
+	char *base = (char*)ptr;
+	--base; // move to the start of the object
+	switch( *base ){
+	case TYPE_ID_TPJOB:
+	{
+		memblock_tpjob *tpjob = (memblock_tpjob*)base;
+		tpjob->isfree = 1;
+		tpjob->next = mempool->head_tpjob;
+		mempool->head_tpjob = tpjob;
+		break;
+	}
+	case TYPE_ID_TRIENODE:
+	{
+		memblock_trienode *trienode = (memblock_trienode*)base;
+		trienode->isfree = 1;
+		trienode->next = mempool->head_trienode;
+		mempool->head_trienode = trienode;
+		break;
+	}
+	}// end of switch
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
 
 
 /***********************************************************************
@@ -206,6 +373,7 @@ struct StartQueryNode{
 int lastMethodCalled = -1; // 1=StartQuery, 2=EndQuery, 3=MatchDocument, 4=InitializeIndex, 5=DestroyIndex
 
 lp_threadpool* threadpool;
+st_mempool *st_main_pool;
 
 std::vector<Document*> documents;
 //pthread_mutex_t mutex_query_set = PTHREAD_MUTEX_INITIALIZER;
@@ -228,7 +396,8 @@ cpu_set_t cpuset;
 void lp_threadpool_destroy(lp_threadpool* pool);
 lp_threadpool* lp_threadpool_init( int threads );
 void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void* args );
-lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool );
+//lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool );
+void lp_threadpool_fetchjob( lp_threadpool* pool, lp_tpjob *njob );
 int lp_threadpool_uniquetid( lp_threadpool* pool );
 void* lp_tpworker_thread( void* _pool );
 void synchronize_threads_master(int tid, void * arg);
@@ -309,7 +478,7 @@ ErrorCode InitializeIndex(){
 
 	lastMethodCalled = 4;
 
-	//fprintf( stderr, "\n\ninitialized index called\n\n" );
+	st_main_pool = st_mempool_init();
 
 	for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
 		for( int j=0; j<9; j++ )
@@ -383,6 +552,8 @@ ErrorCode DestroyIndex(){
 		DocumentDestructor( documents[i] );
 
 	// destroy the thread pool
+
+	st_mempool_destroy( st_main_pool );
 
 	return EC_SUCCESS;
 }
@@ -618,7 +789,13 @@ ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_
 // THREADPOOL STRUCTURE
 
 void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void* args ){
+
+	// ENTER POOL CRITICAL SECTION
+	pthread_mutex_lock( &pool->mutex_pool );
+	//////////////////////////////////////
+
 	lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
+	//lp_tpjob *njob = (lp_tpjob*)st_mempool_alloc( st_main_pool, sizeof(lp_tpjob) );
 	if( !njob ){
 		perror( "Could not create a lp_tpjob...\n" );
 		return;
@@ -626,10 +803,6 @@ void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void
 	njob->args = args;
 	njob->func = func;
 	njob->next = 0;
-
-	// ENTER POOL CRITICAL SECTION
-	pthread_mutex_lock( &pool->mutex_pool );
-	//////////////////////////////////////
 
 	// empty job queue
 	if( pool->pending_jobs == 0 ){
@@ -660,7 +833,8 @@ void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void
 	// signal any worker_thread that new job is available
 	pthread_cond_signal( &pool->cond_jobs );
 }
-lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool ){
+//lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool ){
+void lp_threadpool_fetchjob( lp_threadpool* pool, lp_tpjob *njob ){
 	lp_tpjob* job;
 	// lock pool
 	pthread_mutex_lock( &pool->mutex_pool );
@@ -689,10 +863,16 @@ lp_tpjob* lp_threadpool_fetchjob( lp_threadpool* pool ){
 
 	//fprintf( stderr, "job removed - remained[%d]\n", pool->pending_jobs );
 
+	njob->args = job->args;
+	njob->func = job->func;
+
+	free( job );
+	//st_mempool_free( st_main_pool, job );
+
 	// pool unlock
 	pthread_mutex_unlock( &pool->mutex_pool );
 
-	return job;
+	//return job;
 }
 int lp_threadpool_uniquetid( lp_threadpool* pool ){
 	// returns an id from 1 to number of threads (eg. threads=12, ids = 1,2,3,4,5,6,7,8,9,10,11,12)
@@ -710,16 +890,18 @@ void* lp_tpworker_thread( void* _pool ){
 
 	//fprintf( stderr, "thread[%d] entered worker_thread infite\n", _tid );
 
+    lp_tpjob njob;
+
 	for(;;){
 
 		// fetch next job - blocking method
-		lp_tpjob* njob = lp_threadpool_fetchjob( pool );
+		//lp_tpjob* njob = lp_threadpool_fetchjob( pool );
+
+		lp_threadpool_fetchjob( pool, &njob );
 
 		// execute the function passing in the thread_id - the TID starts from 1 - POOL_THREADS
-		njob->func( _tid , njob->args );
+		njob.func( _tid , njob.args );
 
-		// release memory the job holds
-		free( njob );
 	}
 	return 0;
 }
@@ -795,7 +977,8 @@ void synchronize_complete(lp_threadpool* pool){
 
 TrieNode* TrieNode_Constructor(){
 	TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
-	if( !n ) err_mem("error allocating TrieNode");
+	//TrieNode* n = (TrieNode*)st_mempool_alloc( st_main_pool, sizeof(TrieNode));
+	//if( !n ) err_mem("error allocating TrieNode");
 	n->qids = 0;
 	memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
 	pthread_mutex_init( &n->mutex_node, NULL );
@@ -811,6 +994,7 @@ void TrieNode_Destructor( TrieNode* node ){
 		delete node->qids;
 	pthread_mutex_destroy( &node->mutex_node );
 	free( node );
+	//st_mempool_free( st_main_pool, node );
 }
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
 	char ptr=0;
@@ -1722,6 +1906,22 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 											current[y] = previous[y-1];
 										}else{
 											current[y] = MIN3( previous[y-1], previous[y], current[y-1] ) + 1;
+//
+//											__asm__ (
+//
+//												    "pushq   %%rbp\n\t"
+//												    "movq    %%rsp, %%rbp\n\t"
+//													"movq    8(%%rbp), %%rdx\n\t"
+//												    "movq    12(%%rbp), %%rcx\n\t"
+//												    "movq    16(%%rbp), %%rax\n\t"
+//												    "cmpq    %%rdx, %%rcx\n\t"
+//												    "leave\n\t"
+//												    "cmovbe  %%rcx, %%rdx\n\t"
+//												    "cmpq    %%rax, %%rdx\n\t"
+//												    "cmovbe  %%rdx, %%rax"
+//													 :"=d"(current[y])
+//													 :"a"(previous[y-1]), "b"(previous[y]), "c"(current[y-1])	);
+//											current[y]++;
 										}
 									}
 									t = previous;
