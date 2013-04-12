@@ -211,7 +211,7 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 	case TYPE_ID_TRIENODE:
 	{
 		memblock_trienode *nblock, *prev = mempool->head_trienode;
-		for( unsigned int i=0; i<POOL_SIZE_TPJOB; i++ ){
+		for( unsigned int i=0; i<POOL_SIZE_TRIENODE; i++ ){
 			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
 			nblock = (memblock_trienode*)((char*)base + i*sizeof(memblock_trienode));
 			nblock->block_size = TYPE_SIZE_TRIENODE;

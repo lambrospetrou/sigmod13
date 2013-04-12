@@ -35,11 +35,12 @@
 #include <vector>
 
 //////////////////////////////////////////
-#define NUM_THREADS 400
+
+#define NUM_THREADS 12
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 30
-#define SPARSE_ARRAY_NODE_DATA 9000
+#define WORDS_PROCESSED_BY_THREAD 50
+#define SPARSE_ARRAY_NODE_DATA 3000
 
 #define VALID_CHARS 26
 
@@ -224,11 +225,11 @@ void DeallocateRawMem( raw_memnode *raw_head ){
 
 #define TYPE_SIZE_TPJOB 24
 #define TYPE_ID_TPJOB 1
-#define POOL_SIZE_TPJOB 10000
+#define POOL_SIZE_TPJOB 50000
 
 #define TYPE_SIZE_TRIENODE 264
 #define TYPE_ID_TRIENODE 2
-#define POOL_SIZE_TRIENODE 100000
+#define POOL_SIZE_TRIENODE 150000
 
 struct memblock_tpjob{
 	char type_id;
@@ -273,14 +274,16 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 	case TYPE_ID_TPJOB:
 	{
 		memblock_tpjob *nblock, *prev = mempool->head_tpjob;
+		unsigned int index = 0;
 		for( unsigned int i=0; i<POOL_SIZE_TPJOB; i++ ){
 			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
-			nblock = (memblock_tpjob*)((char*)base + i*sizeof(memblock_tpjob));
+			nblock = (memblock_tpjob*)((char*)base + index);
 			nblock->block_size = TYPE_SIZE_TPJOB;
 			nblock->isfree = 1;
 			nblock->next = prev;
 			nblock->type_id = TYPE_ID_TPJOB;
 			prev = nblock;
+			index += sizeof(memblock_tpjob);
 		}
 		mempool->head_tpjob = prev;
 		break;
@@ -288,14 +291,16 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 	case TYPE_ID_TRIENODE:
 	{
 		memblock_trienode *nblock, *prev = mempool->head_trienode;
+		unsigned int index = 0;
 		for( unsigned int i=0; i<POOL_SIZE_TRIENODE; i++ ){
 			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
-			nblock = (memblock_trienode*)((char*)base + i*sizeof(memblock_trienode));
+			nblock = (memblock_trienode*)((char*)base + index);
 			nblock->block_size = TYPE_SIZE_TRIENODE;
 			nblock->isfree = 1;
 			nblock->next = prev;
 			nblock->type_id = TYPE_ID_TRIENODE;
 			prev = nblock;
+			index += sizeof(memblock_trienode);
 		}
 		mempool->head_trienode = prev;
 		break;
@@ -319,6 +324,7 @@ void* st_mempool_alloc( st_mempool* mempool, unsigned int size ){
 	}
 	case TYPE_SIZE_TRIENODE:
 	{
+		//fprintf( stderr, "1 " );
 		if( mempool->head_trienode == 0 ){
 			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_trienode) * POOL_SIZE_TRIENODE );
 			st_mempool_initblock( mempool, nbase, TYPE_ID_TRIENODE );
@@ -794,8 +800,8 @@ void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void
 	pthread_mutex_lock( &pool->mutex_pool );
 	//////////////////////////////////////
 
-	lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
-	//lp_tpjob *njob = (lp_tpjob*)st_mempool_alloc( st_main_pool, sizeof(lp_tpjob) );
+	//lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
+	lp_tpjob *njob = (lp_tpjob*)st_mempool_alloc( st_main_pool, sizeof(lp_tpjob) );
 	if( !njob ){
 		perror( "Could not create a lp_tpjob...\n" );
 		return;
@@ -866,8 +872,8 @@ void lp_threadpool_fetchjob( lp_threadpool* pool, lp_tpjob *njob ){
 	njob->args = job->args;
 	njob->func = job->func;
 
-	free( job );
-	//st_mempool_free( st_main_pool, job );
+	//free( job );
+	st_mempool_free( st_main_pool, job );
 
 	// pool unlock
 	pthread_mutex_unlock( &pool->mutex_pool );
@@ -976,8 +982,8 @@ void synchronize_complete(lp_threadpool* pool){
 // TRIE FUNCTIONS
 
 TrieNode* TrieNode_Constructor(){
-	TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
-	//TrieNode* n = (TrieNode*)st_mempool_alloc( st_main_pool, sizeof(TrieNode));
+	//TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
+	TrieNode* n = (TrieNode*)st_mempool_alloc( st_main_pool, sizeof(TrieNode));
 	//if( !n ) err_mem("error allocating TrieNode");
 	n->qids = 0;
 	memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
@@ -993,8 +999,8 @@ void TrieNode_Destructor( TrieNode* node ){
 	if( node->qids )
 		delete node->qids;
 	pthread_mutex_destroy( &node->mutex_node );
-	free( node );
-	//st_mempool_free( st_main_pool, node );
+	//free( node );
+	st_mempool_free( st_main_pool, node );
 }
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
 	char ptr=0;
@@ -1612,9 +1618,6 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 					continue;
 				}
 
-
-				//pthread_mutex_lock( &created_index_node->mutex_node );
-
 				if( (query_nodes= created_index_node->query_nodes) == 0 ){
 
 					// WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
@@ -1885,7 +1888,7 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 								// OPTIMIZED DIAGONAL with 2 rows
 
 
-								char left, right, *t;
+								char left, right, *t, xp, yp;
 								previous = _previous;
 								current = _current;
 								previous[0] = 0;
@@ -1894,18 +1897,20 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 									current[y] = 50;
 								}
 								// for each letter of the document word
+								xp = 0;
 								for( x=1; x<= wsz; x++ ){
 									left = MAX( 1, x-iq->match_dist );
 									right = MIN( iq->wsz, x+iq->match_dist + 1 );
+									yp = left-1;
 									if( left > 1 )
-										current[left-1] = 50;
+										current[yp] = 50;
 									else
 										current[0] = x;
 									for( y=left; y<=right; y++ ){
-										if( w[x-1] == iq->word[y-1] ){
-											current[y] = previous[y-1];
+										if( w[xp] == iq->word[yp] ){
+											current[y] = previous[yp];
 										}else{
-											current[y] = MIN3( previous[y-1], previous[y], current[y-1] ) + 1;
+											current[y] = MIN3( previous[yp], previous[y], current[yp] ) + 1;
 //
 //											__asm__ (
 //
@@ -1923,12 +1928,14 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 //													 :"a"(previous[y-1]), "b"(previous[y]), "c"(current[y-1])	);
 //											current[y]++;
 										}
+										yp++;
 									}
 									t = previous;
 									previous = current;
 									current = t;
+									xp++;
 								}
-								if( previous[ y-1 ] <= iq->match_dist ){
+								if( previous[ yp ] <= iq->match_dist ){
 									created_index_node->query_nodes->push_back(iq->query_node);
 								}
 
