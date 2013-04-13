@@ -36,17 +36,34 @@
 
 //////////////////////////////////////////
 
-#define NUM_THREADS 12
+#define NUM_THREADS 4
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 50
-#define SPARSE_ARRAY_NODE_DATA 3000
+#define WORDS_PROCESSED_BY_THREAD 10
+#define SPARSE_ARRAY_NODE_DATA 2000
 
 #define VALID_CHARS 26
 
 #define MAX( a, b ) ( ((a) >= (b))?(a):(b) )
 #define MIN( a, b ) ( ((a) <= (b))?(a):(b) )
 #define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
+
+inline int min( int a, int b ){
+	int mask = (a-b) >> 31;
+	return ( (a&mask) | (b&~mask) );
+}
+
+int inline least( int a, int b, int c ){
+	__asm__(
+		"cmp %0, %1\n\t"
+			"cmovle %1, %0\n\t"
+			"cmp %0, %2\n\t"
+			"cmovle %2, %0\n\t"
+			:"+r"(a)
+			 :"%r"(b), "r"(c)
+	);
+	return a;
+}
 
 /***********************************************************
  * STRUCTURES
@@ -67,11 +84,11 @@ struct QueryNode{
 typedef std::vector<QueryNode> QueryArrayList;
 
 struct TrieNode{
-	TrieNode* children[VALID_CHARS];
-	QueryArrayList *qids;
-	pthread_mutex_t mutex_node;
 	char wsz;
 	unsigned int income_pos;
+	QueryArrayList *qids;
+	TrieNode* children[VALID_CHARS];
+	pthread_mutex_t mutex_node;
 };
 
 struct TrieSet{
@@ -86,7 +103,7 @@ typedef std::vector<TrieNode*> QueryNodesList;
 struct TrieNodeIndex{
 	TrieNodeIndex* children[VALID_CHARS];
 	QueryNodesList *query_nodes;
-	pthread_mutex_t mutex_node;
+	pthread_rwlock_t lock_node;
 	unsigned int income_index[MAX_WORD_LENGTH+1][9];
 };
 struct IndexDB{
@@ -126,9 +143,9 @@ struct TrieNodeVisited{
 struct SparseArrayNode{
 	SparseArrayNode* next;
 	SparseArrayNode* prev;
-	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 	unsigned int low;
 	unsigned int high;
+	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 };
 struct SparseArray{
 	SparseArrayNode* head;
@@ -154,6 +171,7 @@ struct DocumentHandlerNode{
 };
 
 struct lp_tpjob{
+	char dummy;
 	void *args;
 	void *(*func)(int, void *);
 	lp_tpjob *next;
@@ -199,37 +217,57 @@ struct EditNode{
 // MEMMANAGER
 //////////////////////////////////////////////////////////////////////////
 
+#define RAW_BLOCK_SIZE ((unsigned long)1<<32)
+
 struct raw_memnode{
-	raw_memnode* next;
-	char* data;
+	char* blocks[100];
+	char* next_index[100];
+	int num_of_blocks;
 };
 
 void* AllocateRawMemBlock( raw_memnode *raw_head, unsigned int size ){
-	char *n = ( char* )malloc( size );
-	raw_memnode *rn = (raw_memnode*)malloc( sizeof( raw_memnode ) );
-	rn->data = n;
-	rn->next = raw_head->next;
-	raw_head->next = rn;
+	char *n;
+	for( int i=0,sz=raw_head->num_of_blocks; i<sz; i++ ){
+		char *cpos = raw_head->next_index[i];
+		if( (cpos + size) < (raw_head->blocks[i] + RAW_BLOCK_SIZE) ){
+			raw_head->next_index[i] += size;
+			return cpos;
+		}
+	}
+	n = (char*)malloc( RAW_BLOCK_SIZE );
+	raw_head->blocks[ raw_head->num_of_blocks ] = n;
+	raw_head->next_index[ raw_head->num_of_blocks++ ] = n+size;
 	return n;
 }
-
 void DeallocateRawMem( raw_memnode *raw_head ){
-	raw_memnode *n, *t;
-	for( n=raw_head->next; n; n=t ){
-		t = n->next;
-		free( n->data );
-		free( n );
+	for( unsigned int i=0,sz=raw_head->num_of_blocks; i<sz; i++ ){
+		free( raw_head->blocks[i] );
 	}
-	//free( raw_head );
 }
 
-#define TYPE_SIZE_TPJOB 24
+#define TYPE_SIZE_TPJOB sizeof( lp_tpjob )//32
 #define TYPE_ID_TPJOB 1
-#define POOL_SIZE_TPJOB 50000
+#define POOL_SIZE_TPJOB 1000
 
-#define TYPE_SIZE_TRIENODE 264
+#define TYPE_SIZE_TRIENODE sizeof(TrieNode) //264
 #define TYPE_ID_TRIENODE 2
-#define POOL_SIZE_TRIENODE 150000
+#define POOL_SIZE_TRIENODE 5000
+
+#define TYPE_SIZE_DOCUMENT  sizeof(Document) //120
+#define TYPE_ID_DOCUMENT 3
+#define POOL_SIZE_DOCUMENT 100
+
+#define TYPE_SIZE_24B sizeof(SparseArray)//24
+#define TYPE_ID_24B 4
+#define POOL_SIZE_24B 100
+
+#define TYPE_SIZE_4B  sizeof( DocumentHandlerNode )//4
+#define TYPE_ID_4B 5
+#define POOL_SIZE_4B 100
+
+#define TYPE_SIZE_4M 4194304 // 2^22
+#define TYPE_ID_4M 6
+#define POOL_SIZE_4M 100
 
 struct memblock_tpjob{
 	char type_id;
@@ -247,6 +285,34 @@ struct memblock_trienode{
 	memblock_trienode *next;
 };
 
+struct memblock_document{
+	char type_id;
+	Document document;
+	char isfree;
+	memblock_document *next;
+};
+
+struct memblock_24b{
+	char type_id;
+	char bytes[TYPE_SIZE_24B] ;
+	char isfree;
+	memblock_24b *next;
+};
+
+struct memblock_4b{
+	char type_id;
+	char bytes[TYPE_SIZE_4B];
+	char isfree;
+	memblock_4b *next;
+};
+
+struct memblock_4m{
+	char type_id;
+	char bytes[TYPE_SIZE_4M];
+	char isfree;
+	memblock_4m *next;
+};
+
 struct st_mempool{
 
 	// define the raw_memory container
@@ -255,13 +321,22 @@ struct st_mempool{
 	// define the head nodes for the available blocks for each type
 	memblock_tpjob *head_tpjob;
 	memblock_trienode *head_trienode;
+	memblock_document *head_document;
+	memblock_24b *head_24b;
+	memblock_4b *head_4b;
+	memblock_4m *head_4m;
 };
 
 st_mempool* st_mempool_init(){
 	st_mempool *stp = (st_mempool*)malloc( sizeof( st_mempool ) );
-	stp->raw_head.next = 0;
 	stp->head_tpjob = 0;
 	stp->head_trienode = 0;
+	stp->head_document = 0;
+	stp->head_24b = 0;
+	stp->head_4b = 0;
+	stp->head_4m = 0;
+	stp->raw_head.blocks[0] = (char*)calloc( RAW_BLOCK_SIZE, 1 );
+	stp->raw_head.next_index[0] =  stp->raw_head.blocks[0];
 	return stp;
 }
 
@@ -278,7 +353,6 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 		for( unsigned int i=0; i<POOL_SIZE_TPJOB; i++ ){
 			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
 			nblock = (memblock_tpjob*)((char*)base + index);
-			nblock->block_size = TYPE_SIZE_TPJOB;
 			nblock->isfree = 1;
 			nblock->next = prev;
 			nblock->type_id = TYPE_ID_TPJOB;
@@ -295,7 +369,6 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 		for( unsigned int i=0; i<POOL_SIZE_TRIENODE; i++ ){
 			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
 			nblock = (memblock_trienode*)((char*)base + index);
-			nblock->block_size = TYPE_SIZE_TRIENODE;
 			nblock->isfree = 1;
 			nblock->next = prev;
 			nblock->type_id = TYPE_ID_TRIENODE;
@@ -303,6 +376,66 @@ void st_mempool_initblock( st_mempool *mempool, void* base, char type_id ){
 			index += sizeof(memblock_trienode);
 		}
 		mempool->head_trienode = prev;
+		break;
+	}
+	case TYPE_ID_DOCUMENT:
+	{
+		memblock_document *nblock, *prev = mempool->head_document;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_DOCUMENT; i++ ){
+			nblock = (memblock_document*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_DOCUMENT;
+			prev = nblock;
+			index += sizeof(memblock_document);
+		}
+		mempool->head_document = prev;
+		break;
+	}
+	case TYPE_ID_24B:
+	{
+		memblock_24b *nblock, *prev = mempool->head_24b;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_24B; i++ ){
+			nblock = (memblock_24b*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_24B;
+			prev = nblock;
+			index += sizeof(memblock_24b);
+		}
+		mempool->head_24b = prev;
+		break;
+	}
+	case TYPE_ID_4B:
+	{
+		memblock_4b *nblock, *prev = mempool->head_4b;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_4B; i++ ){
+			nblock = (memblock_4b*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_4B;
+			prev = nblock;
+			index += sizeof(memblock_4b);
+		}
+		mempool->head_4b = prev;
+		break;
+	}
+	case TYPE_ID_4M:
+	{
+		memblock_4m *nblock, *prev = mempool->head_4m;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_4M; i++ ){
+			nblock = (memblock_4m*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_4M;
+			prev = nblock;
+			index += sizeof(memblock_4m);
+		}
+		mempool->head_4m = prev;
 		break;
 	}
 	}// end of switch type
@@ -335,6 +468,58 @@ void* st_mempool_alloc( st_mempool* mempool, unsigned int size ){
 		return &base->trienode;
 		break;
 	}
+	case TYPE_SIZE_DOCUMENT:
+	{
+		//fprintf( stderr, "1 " );
+		if( mempool->head_document == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_document) * POOL_SIZE_DOCUMENT );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_DOCUMENT );
+		}
+		memblock_document *base = mempool->head_document;
+		mempool->head_document = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->document;
+		break;
+	}
+	case TYPE_SIZE_24B:
+	{
+		//fprintf( stderr, "1 " );
+		if( mempool->head_24b == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_24b) * POOL_SIZE_24B );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_24B);
+		}
+		memblock_24b *base = mempool->head_24b;
+		mempool->head_24b = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->bytes;
+		break;
+	}
+	case TYPE_SIZE_4B:
+	{
+		//fprintf( stderr, "1 " );
+		if( mempool->head_4b == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_4b) * POOL_SIZE_4B );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_4B);
+		}
+		memblock_4b *base = mempool->head_4b;
+		mempool->head_4b = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->bytes;
+		break;
+	}
+	case TYPE_SIZE_4M:
+	{
+		//fprintf( stderr, "1 " );
+		if( mempool->head_4m == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_4m) * POOL_SIZE_4M );
+			st_mempool_initblock( mempool, nbase, TYPE_ID_4M);
+		}
+		memblock_4m *base = mempool->head_4m;
+		mempool->head_4m = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		return &base->bytes;
+		break;
+	}
 	}// END OF SWITCH
 	return 0;
 }
@@ -359,8 +544,315 @@ void st_mempool_free( st_mempool *mempool, void *ptr ){
 		mempool->head_trienode = trienode;
 		break;
 	}
+	case TYPE_ID_DOCUMENT:
+	{
+		memblock_document *document = (memblock_document*)base;
+		document->isfree = 1;
+		document->next = mempool->head_document;
+		mempool->head_document = document;
+		break;
+	}
+	case TYPE_ID_24B:
+		{
+			memblock_24b *querysetnode = (memblock_24b*)base;
+			querysetnode->isfree = 1;
+			querysetnode->next = mempool->head_24b;
+			mempool->head_24b = querysetnode;
+			break;
+		}
+	case TYPE_ID_4B:
+		{
+			memblock_4b *documenthandlernode = (memblock_4b*)base;
+			documenthandlernode->isfree = 1;
+			documenthandlernode->next = mempool->head_4b;
+			mempool->head_4b = documenthandlernode;
+			break;
+		}
+	case TYPE_ID_4M:
+		{
+			memblock_4m *documenthandlernode = (memblock_4m*)base;
+			documenthandlernode->isfree = 1;
+			documenthandlernode->next = mempool->head_4m;
+			mempool->head_4m = documenthandlernode;
+			break;
+		}
+
 	}// end of switch
 }
+
+#define TYPE_SIZE_SPARSEARRAYNODE  sizeof(SparseArrayNode) //42024
+#define TYPE_ID_SPARSEARRAYNODE 1
+#define POOL_SIZE_SPARSEARRAYNODE 100
+
+#define TYPE_SIZE_TRIENODEINDEX sizeof(TrieNodeIndex)//1424
+#define TYPE_ID_TRIENODEINDEX 2
+#define POOL_SIZE_TRIENODEINDEX 5000
+
+#define TYPE_SIZE_TRIESEARCHDATA sizeof(TrieSearchData)//96
+#define TYPE_ID_TRIESEARCHDATA 3
+#define POOL_SIZE_TRIESEARCHDATA 1000
+
+#define TYPE_SIZE_TRIENODEVISITED sizeof(TrieNodeVisited) //216
+#define TYPE_ID_TRIENODEVISITED 4
+#define POOL_SIZE_TRIENODEVISITED 1000
+
+struct memblock_sparsearraynode{
+	char type_id;
+	SparseArrayNode sparsearraynode;
+	char isfree;
+	memblock_sparsearraynode *next;
+};
+struct memblock_trienodeindex{
+	char type_id;
+	TrieNodeIndex trienodeindex;
+	char isfree;
+	memblock_trienodeindex *next;
+};
+struct memblock_triesearchdata{
+	char type_id;
+	TrieSearchData triesearchdata;
+	char isfree;
+	memblock_triesearchdata *next;
+};
+struct memblock_trienodevisited{
+	char type_id;
+	TrieNodeVisited trienodevisisted;
+	char isfree;
+	memblock_trienodevisited *next;
+};
+
+struct mt_mempool{
+
+	// define the raw_memory container
+	raw_memnode raw_head;
+
+	// define the head nodes for the available blocks for each type
+	memblock_sparsearraynode *head_sparsearraynode;
+	memblock_trienodeindex *head_trienodeindex;
+	memblock_triesearchdata *head_triesearchdata;
+	memblock_trienodevisited *head_trienodevisited;
+
+	pthread_mutex_t lock1;
+	pthread_mutex_t lock2;
+	pthread_mutex_t lock3;
+	pthread_mutex_t lock4;
+
+};
+
+mt_mempool* mt_mempool_init(){
+	mt_mempool *stp = (mt_mempool*)malloc( sizeof( mt_mempool ) );
+	stp->head_sparsearraynode = 0;
+	stp->head_trienodeindex = 0;
+	stp->head_trienodevisited = 0;
+	stp->head_triesearchdata = 0;
+	stp->raw_head.blocks[0] = (char*)calloc( RAW_BLOCK_SIZE, 1 );
+	stp->raw_head.next_index[0] =  stp->raw_head.blocks[0];
+
+	stp->lock1 = PTHREAD_MUTEX_INITIALIZER;
+	stp->lock2 = PTHREAD_MUTEX_INITIALIZER;
+	stp->lock3 = PTHREAD_MUTEX_INITIALIZER;
+	stp->lock4 = PTHREAD_MUTEX_INITIALIZER;
+
+	return stp;
+}
+
+void mt_mempool_destroy( mt_mempool *mempool ){
+	DeallocateRawMem( &mempool->raw_head );
+	pthread_mutex_destroy( &mempool->lock1 );
+	pthread_mutex_destroy( &mempool->lock2 );
+	pthread_mutex_destroy( &mempool->lock3 );
+	pthread_mutex_destroy( &mempool->lock4 );
+}
+
+void mt_mempool_initblock( mt_mempool *mempool, void* base, char type_id ){
+	switch( type_id ){
+	case TYPE_ID_SPARSEARRAYNODE:
+	{
+		//pthread_mutex_lock( &mempool->lock1 );
+		memblock_sparsearraynode *nblock, *prev = mempool->head_sparsearraynode;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_SPARSEARRAYNODE; i++ ){
+			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
+			nblock = (memblock_sparsearraynode*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_SPARSEARRAYNODE;
+			prev = nblock;
+			index += sizeof(memblock_sparsearraynode);
+		}
+		mempool->head_sparsearraynode = prev;
+		//pthread_mutex_unlock( &mempool->lock1 );
+		break;
+	}
+	case TYPE_ID_TRIENODEINDEX:
+	{
+		//pthread_mutex_lock( &mempool->lock2 );
+		memblock_trienodeindex *nblock, *prev = mempool->head_trienodeindex;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_TRIENODEINDEX; i++ ){
+			//nblock = &(static_cast<memblock_tpjob*>(base)[i*(sizeof(memblock_tpjob))]);
+			nblock = (memblock_trienodeindex*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_TRIENODEINDEX;
+			prev = nblock;
+			index += sizeof(memblock_trienodeindex);
+		}
+		mempool->head_trienodeindex = prev;
+		//pthread_mutex_unlock( &mempool->lock2 );
+		break;
+	}
+	case TYPE_ID_TRIESEARCHDATA:
+	{
+		//pthread_mutex_lock( &mempool->lock3 );
+		memblock_triesearchdata *nblock, *prev = mempool->head_triesearchdata;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_TRIESEARCHDATA; i++ ){
+			nblock = (memblock_triesearchdata*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_TRIESEARCHDATA;
+			prev = nblock;
+			index += sizeof(memblock_triesearchdata);
+		}
+		mempool->head_triesearchdata = prev;
+		//pthread_mutex_unlock( &mempool->lock3 );
+		break;
+	}
+	case TYPE_ID_TRIENODEVISITED:
+	{
+		//pthread_mutex_lock( &mempool->lock4 );
+		memblock_trienodevisited *nblock, *prev = mempool->head_trienodevisited;
+		unsigned int index = 0;
+		for( unsigned int i=0; i<POOL_SIZE_TRIENODEVISITED; i++ ){
+			nblock = (memblock_trienodevisited*)((char*)base + index);
+			nblock->isfree = 1;
+			nblock->next = prev;
+			nblock->type_id = TYPE_ID_TRIENODEVISITED;
+			prev = nblock;
+			index += sizeof(memblock_trienodevisited);
+		}
+		mempool->head_trienodevisited = prev;
+		//pthread_mutex_unlock( &mempool->lock4 );
+		break;
+	}
+	}// end of switch type
+}
+
+void* mt_mempool_alloc( mt_mempool* mempool, unsigned int size ){
+	switch( size ){
+	case TYPE_SIZE_SPARSEARRAYNODE:
+	{
+		pthread_mutex_lock( &mempool->lock1 );
+		if( mempool->head_sparsearraynode == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_sparsearraynode) * POOL_SIZE_SPARSEARRAYNODE );
+			//fprintf( stderr, "[%p]\n", nbase );
+			mt_mempool_initblock( mempool, nbase, TYPE_ID_SPARSEARRAYNODE );
+		}
+		memblock_sparsearraynode *base = mempool->head_sparsearraynode;
+		mempool->head_sparsearraynode = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		pthread_mutex_unlock( &mempool->lock1 );
+		return &base->sparsearraynode;
+		break;
+	}
+	case TYPE_SIZE_TRIENODEINDEX:
+	{
+		pthread_mutex_lock( &mempool->lock2 );
+		//fprintf( stderr, "1 " );
+		if( mempool->head_trienodeindex == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_trienodeindex) * POOL_SIZE_TRIENODEINDEX );
+			mt_mempool_initblock( mempool, nbase, TYPE_ID_TRIENODEINDEX );
+		}
+		memblock_trienodeindex *base = mempool->head_trienodeindex;
+		mempool->head_trienodeindex = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		pthread_mutex_unlock( &mempool->lock2 );
+		return &base->trienodeindex;
+		break;
+	}
+	case TYPE_SIZE_TRIESEARCHDATA:
+	{
+		//fprintf( stderr, "1 " );
+		pthread_mutex_lock( &mempool->lock3 );
+		if( mempool->head_triesearchdata == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_triesearchdata) * POOL_SIZE_TRIESEARCHDATA );
+			mt_mempool_initblock( mempool, nbase, TYPE_ID_TRIESEARCHDATA );
+		}
+		memblock_triesearchdata *base = mempool->head_triesearchdata;
+		mempool->head_triesearchdata = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		pthread_mutex_unlock( &mempool->lock3 );
+		return &base->triesearchdata;
+		break;
+	}
+	case TYPE_SIZE_TRIENODEVISITED:
+	{
+		pthread_mutex_lock( &mempool->lock4 );
+		//fprintf( stderr, "1 " );
+		if( mempool->head_trienodevisited == 0 ){
+			void * nbase = AllocateRawMemBlock( &mempool->raw_head, sizeof(memblock_trienodevisited) * POOL_SIZE_TRIENODEVISITED );
+			mt_mempool_initblock( mempool, nbase, TYPE_ID_TRIENODEVISITED);
+		}
+		memblock_trienodevisited *base = mempool->head_trienodevisited;
+		mempool->head_trienodevisited = base->next; // to get the next free block pointer
+		base->isfree = 0; // not free anymore
+		pthread_mutex_unlock( &mempool->lock4 );
+		return &base->trienodevisisted;
+		break;
+	}
+	}// END OF SWITCH
+	return 0;
+}
+
+void mt_mempool_free( mt_mempool *mempool, void *ptr ){
+	char *base = (char*)ptr;
+	--base; // move to the start of the object
+	switch( *base ){
+	case TYPE_ID_SPARSEARRAYNODE:
+	{
+		pthread_mutex_lock( &mempool->lock1 );
+		memblock_sparsearraynode *sparsearraynode = (memblock_sparsearraynode*)base;
+		sparsearraynode->isfree = 1;
+		sparsearraynode->next = mempool->head_sparsearraynode;
+		mempool->head_sparsearraynode = sparsearraynode;
+		pthread_mutex_unlock( &mempool->lock1 );
+		break;
+	}
+	case TYPE_ID_TRIENODEINDEX:
+	{
+		pthread_mutex_lock( &mempool->lock2 );
+		memblock_trienodeindex *trienodeindex = (memblock_trienodeindex*)base;
+		trienodeindex->isfree = 1;
+		trienodeindex->next = mempool->head_trienodeindex;
+		mempool->head_trienodeindex = trienodeindex;
+		pthread_mutex_unlock( &mempool->lock2 );
+		break;
+	}
+	case TYPE_ID_TRIESEARCHDATA:
+	{
+		pthread_mutex_lock( &mempool->lock3 );
+		memblock_triesearchdata *tsd = (memblock_triesearchdata*)base;
+		tsd->isfree = 1;
+		tsd->next = mempool->head_triesearchdata;
+		mempool->head_triesearchdata = tsd;
+		pthread_mutex_unlock( &mempool->lock3 );
+		break;
+	}
+	case TYPE_ID_TRIENODEVISITED:
+		{
+			pthread_mutex_lock( &mempool->lock4 );
+			memblock_trienodevisited *trienodevisited = (memblock_trienodevisited*)base;
+			trienodevisited->isfree = 1;
+			trienodevisited->next = mempool->head_trienodevisited;
+			mempool->head_trienodevisited = trienodevisited;
+			pthread_mutex_unlock( &mempool->lock4 );
+			break;
+		}
+
+	}// end of switch
+}
+
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -380,6 +872,7 @@ int lastMethodCalled = -1; // 1=StartQuery, 2=EndQuery, 3=MatchDocument, 4=Initi
 
 lp_threadpool* threadpool;
 st_mempool *st_main_pool;
+mt_mempool *mt_thread_pool;
 
 std::vector<Document*> documents;
 //pthread_mutex_t mutex_query_set = PTHREAD_MUTEX_INITIALIZER;
@@ -485,6 +978,7 @@ ErrorCode InitializeIndex(){
 	lastMethodCalled = 4;
 
 	st_main_pool = st_mempool_init();
+	mt_thread_pool = mt_mempool_init();
 
 	for( int i=0; i<MAX_WORD_LENGTH+1; i++ ){
 		for( int j=0; j<9; j++ )
@@ -560,6 +1054,7 @@ ErrorCode DestroyIndex(){
 	// destroy the thread pool
 
 	st_mempool_destroy( st_main_pool );
+	mt_mempool_destroy( mt_thread_pool );
 
 	return EC_SUCCESS;
 }
@@ -576,7 +1071,7 @@ ErrorCode StartQuery(QueryID query_id, const char* query_str, MatchType match_ty
 
 	int i,j;
 
-	QuerySetNode* qnode = (QuerySetNode*)malloc(sizeof(QuerySetNode));
+	QuerySetNode* qnode = (QuerySetNode*)st_mempool_alloc( st_main_pool, sizeof( QuerySetNode ) ); //(QuerySetNode*)malloc(sizeof(QuerySetNode));
 	qnode->type = match_type;
 	qnode->words = (TrieNode**)malloc(sizeof(TrieNode*)*MAX_QUERY_WORDS);
 	qnode->words_num = 0;
@@ -724,7 +1219,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	documents.push_back( doc );
 	strcpy( doc->doc, doc_str );
 
-	DocumentHandlerNode* dn = (DocumentHandlerNode*)malloc(sizeof(DocumentHandlerNode));
+	DocumentHandlerNode* dn = (DocumentHandlerNode*)st_mempool_alloc( st_main_pool, sizeof(DocumentHandlerNode) ); //(DocumentHandlerNode*)malloc(sizeof(DocumentHandlerNode));
 	dn->doc_id = doc->doc_id;
 	lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentHandler), dn );
 
@@ -800,8 +1295,8 @@ void lp_threadpool_addjob( lp_threadpool* pool, void *(*func)(int, void *), void
 	pthread_mutex_lock( &pool->mutex_pool );
 	//////////////////////////////////////
 
-	//lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
-	lp_tpjob *njob = (lp_tpjob*)st_mempool_alloc( st_main_pool, sizeof(lp_tpjob) );
+	lp_tpjob *njob = (lp_tpjob*)malloc( sizeof(lp_tpjob) );
+	//lp_tpjob *njob = (lp_tpjob*)st_mempool_alloc( st_main_pool, sizeof(lp_tpjob) );
 	if( !njob ){
 		perror( "Could not create a lp_tpjob...\n" );
 		return;
@@ -872,8 +1367,8 @@ void lp_threadpool_fetchjob( lp_threadpool* pool, lp_tpjob *njob ){
 	njob->args = job->args;
 	njob->func = job->func;
 
-	//free( job );
-	st_mempool_free( st_main_pool, job );
+	free( job );
+	//st_mempool_free( st_main_pool, job );
 
 	// pool unlock
 	pthread_mutex_unlock( &pool->mutex_pool );
@@ -982,8 +1477,8 @@ void synchronize_complete(lp_threadpool* pool){
 // TRIE FUNCTIONS
 
 TrieNode* TrieNode_Constructor(){
-	//TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
-	TrieNode* n = (TrieNode*)st_mempool_alloc( st_main_pool, sizeof(TrieNode));
+	TrieNode* n = (TrieNode*)malloc(sizeof(TrieNode));
+	//TrieNode* n = (TrieNode*)st_mempool_alloc( st_main_pool, sizeof(TrieNode));
 	//if( !n ) err_mem("error allocating TrieNode");
 	n->qids = 0;
 	memset( n->children, 0, VALID_CHARS*sizeof(TrieNode*) );
@@ -999,8 +1494,8 @@ void TrieNode_Destructor( TrieNode* node ){
 	if( node->qids )
 		delete node->qids;
 	pthread_mutex_destroy( &node->mutex_node );
-	//free( node );
-	st_mempool_free( st_main_pool, node );
+	free( node );
+	//st_mempool_free( st_main_pool, node );
 }
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
 	char ptr=0;
@@ -1228,11 +1723,13 @@ void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, cons
 }
 
 TrieNodeIndex* TrieNodeIndex_Constructor(){
-	TrieNodeIndex* n = (TrieNodeIndex*)malloc(sizeof(TrieNodeIndex));
-	if( !n ) err_mem("error allocating TrieNodeIndex");
+	//TrieNodeIndex* n = (TrieNodeIndex*)malloc(sizeof(TrieNodeIndex));
+	TrieNodeIndex* n = (TrieNodeIndex*)mt_mempool_alloc(mt_thread_pool, sizeof(TrieNodeIndex));
+	//if( !n ) err_mem("error allocating TrieNodeIndex");
 	n->query_nodes = 0;
 	memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeIndex*) );
-	pthread_mutex_init( &n->mutex_node, NULL );
+	//pthread_mutex_init( &n->mutex_node, NULL );
+	n->lock_node = PTHREAD_RWLOCK_INITIALIZER;
 	memset( n->income_index, 0, (MAX_WORD_LENGTH+1) * sizeof(unsigned int) * 9 );
 	return n;
 }
@@ -1244,17 +1741,28 @@ void TrieNodeIndex_Destructor( TrieNodeIndex* node ){
 	}
 	if( node->query_nodes )
 		delete node->query_nodes;
-	pthread_mutex_destroy( &node->mutex_node );
-	free( node );
+	//pthread_mutex_destroy( &node->mutex_node );
+	pthread_rwlock_destroy( &node->lock_node );
+	//free( node );
+	mt_mempool_free(mt_thread_pool, node);
 }
 TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char* word, char word_sz ){
-	char ptr=0;
+	char ptr=0, flag;
 	char pos;
 	while( ptr < word_sz ){
+		flag = 0;
 		pos = word[ptr] - 'a';
+		//pthread_rwlock_rdlock( &node->lock_node );
 		if( node->children[pos] == 0 ){
-			node->children[pos] = TrieNodeIndex_Constructor();
+			//pthread_rwlock_unlock( &node->lock_node );
+			//pthread_rwlock_wrlock( &node->lock_node );
+			//if( node->children[pos] == 0 )
+			    //node->children[pos] = TrieNodeIndex_Constructor();
+			//pthread_rwlock_unlock( &node->lock_node );
+			__sync_val_compare_and_swap( node->children + pos, 0, TrieNodeIndex_Constructor() );
 		}
+		//pthread_rwlock_unlock( &node->lock_node );
+
 		node = node->children[pos];
 		ptr++;
 	}
@@ -1264,8 +1772,9 @@ TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char*
 // TRIE VISITED STRUCTURE END
 
 TrieNodeVisited* TrieNodeVisited_Constructor(){
-	TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
-	if( !n ) err_mem("error allocating TrieNode");
+	//TrieNodeVisited* n = (TrieNodeVisited*)malloc(sizeof(TrieNodeVisited));
+	TrieNodeVisited* n = (TrieNodeVisited*)mt_mempool_alloc(mt_thread_pool, sizeof(TrieNodeVisited));
+	//if( !n ) err_mem("error allocating TrieNode");
 	memset( n->children, 0, VALID_CHARS*sizeof(TrieNodeVisited*) );
 	n->exists = 0;
 	return n;
@@ -1285,7 +1794,8 @@ void TrieNodeVisited_Destructor( TrieNodeVisited* node ){
 				stack_size++;
 			}
 		}
-		free( cnode );
+		//free( cnode );
+		mt_mempool_free(mt_thread_pool, cnode);
 	}
 }
 char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
@@ -1316,8 +1826,9 @@ void TrieVisitedClear(TrieNodeVisited* node){
 //  DOCUMENT STRUCTURE
 
 Document* DocumentConstructor(){
-	Document* doc = (Document*)malloc(sizeof(Document));
-	doc->doc=(char*)malloc( MAX_DOC_LENGTH );
+	Document* doc = (Document*)st_mempool_alloc( st_main_pool, sizeof(Document) );//(Document*)malloc(sizeof(Document));
+	//doc->doc=(char*)malloc( MAX_DOC_LENGTH );
+	doc->doc=(char*)st_mempool_alloc(st_main_pool, MAX_DOC_LENGTH );
 	doc->doc_id=0;
 	doc->finished_jobs = 0;
 	doc->total_jobs = MAX_DOC_LENGTH;
@@ -1330,10 +1841,12 @@ Document* DocumentConstructor(){
 void DocumentDestructor( Document *doc ){
 	pthread_mutex_destroy( &doc->mutex_finished_jobs );
 	pthread_mutex_destroy( &doc->mutex_query_ids );
-	free( doc );
+	//free( doc );
+	st_mempool_free( st_main_pool, doc );
 }
 void DocumentDeallocate(Document *doc){
-	free( doc->doc );
+	//free( doc->doc );
+	st_mempool_free( st_main_pool, doc->doc );
 	TrieNodeVisited_Destructor( doc->visited );
 	SparseArray_Destructor( doc->query_ids );
 }
@@ -1341,7 +1854,9 @@ void DocumentDeallocate(Document *doc){
 // SPARSE ARRAY STRUCTURE
 
 SparseArrayNode* SparseArrayNode_Constructor(){
-	SparseArrayNode* n = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
+	//SparseArrayNode* n = (SparseArrayNode*)malloc(sizeof(SparseArrayNode));
+	SparseArrayNode* n = (SparseArrayNode*)mt_mempool_alloc( mt_thread_pool ,sizeof(SparseArrayNode));
+	//fprintf( stderr, "[%p]\n", n );
 	n->low = 0;
 	n->high = n->low + SPARSE_ARRAY_NODE_DATA-1;
 	memset( n->data, 0, SPARSE_ARRAY_NODE_DATA*(MAX_QUERY_WORDS+1) );
@@ -1358,9 +1873,11 @@ SparseArray* SparseArray_Constructor(){
 void SparseArray_Destructor(SparseArray* n){
 	for( SparseArrayNode* prev; n->head; n->head=prev ){
 		prev = n->head->next;
-		free( n->head );
+		//free( n->head );
+		mt_mempool_free( mt_thread_pool, n->head );
 	}
-	free( n );
+	//free( n );
+	st_mempool_free( st_main_pool, n );
 }
 void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 	SparseArrayNode* prev=sa->head, *cnode;
@@ -1489,86 +2006,92 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 
 			return 0;
 		}
-		bool compareQueryNodes( const QueryNode &a, const QueryNode &b){
-			if( a.qid < b.qid  )
-				return true;
-			if( a.qid > b.qid )
-				return false;
-			return a.pos <= b.pos;
-		}
-int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
-                {
-                        int diff=1;
-                        int i=0;
-                        int j=0;
-                        for (i=0,j=0;i<length_mikri;i++,j++){
-                                if (mikri[i]==megali[j])
-                                        continue;
-                                else {
-                                        diff--;
-                                        if (diff==-1)
-                                                return 0;
-                                        else { i--;continue;}
-                                }
-
-                        }
-
-		return 1;
-                }
 
 
-
-
-
-
-		int difference_three_distance_3(char *mikri,int length_mikri,char *megali)
-		{
-			int diff=3;
-			int i=0;
-			int j=0;
-			for (i=0,j=0;i<length_mikri;i++,j++){
-				if (mikri[i]==megali[j])
-					continue;
-				else {
-					diff--;
-					if (diff==-1)
-						return 0;
-					else { i--;continue;}
-				}
+int difference_one_distance_one(char *mikri, int length_mikri, char *megali) {
+	int diff = 1;
+	int i = 0;
+	int j = 0;
+	for (i = 0, j = 0; i < length_mikri; i++, j++) {
+		if (mikri[i] == megali[j])
+			continue;
+		else {
+			diff--;
+			if (diff == -1)
+				return 0;
+			else {
+				i--;
+				continue;
 			}
-		return 1;
 		}
-		int difference_two_distance_2(char *mikri,int length_mikri,char *megali)
-		{
-			int diff=2;
-			int i=0;
-			int j=0;
-			for (i=0,j=0;i<length_mikri;i++,j++){
-				if (mikri[i]==megali[j])
-					continue;
-				else {
-					diff--;
-					if (diff==-1)
-						return 0;
-					else { i--;continue;}
-				}
-			}
+	}
 	return 1;
+}
+
+int difference_three_distance_3(char *mikri, int length_mikri, char *megali) {
+	int diff = 3;
+	int i = 0;
+	int j = 0;
+	for (i = 0, j = 0; i < length_mikri; i++, j++) {
+		if (mikri[i] == megali[j])
+			continue;
+		else {
+			diff--;
+			if (diff == -1)
+				return 0;
+			else {
+				i--;
+				continue;
+			}
 		}
+	}
+	return 1;
+}
+int difference_two_distance_2(char *mikri, int length_mikri, char *megali) {
+	int diff = 2;
+	int i = 0;
+	int j = 0;
+	for (i = 0, j = 0; i < length_mikri; i++, j++) {
+		if (mikri[i] == megali[j])
+			continue;
+		else {
+			diff--;
+			if (diff == -1)
+				return 0;
+			else {
+				i--;
+				continue;
+			}
+		}
+	}
+	return 1;
+}
+
+int no_difference_distance_3(char *mikri, int length_mikri, char *megali) {
+
+	int i, diff = 0;
+	for (i = 0; i < length_mikri; i++)
+		if (mikri[i] != megali[i]) {
+			diff++;
+			if (diff == 4)
+				return 0;
+		}
+	return 1;
+}
+
+int no_difference_distance_1(char *mikri, int length_mikri, char *megali) {
+	int i, diff = 0;
+	for (i = 0; i < length_mikri; i++)
+		if (mikri[i] != megali[i]) {
+			diff++;
+			if (diff == 2)
+				return 0;
+		}
+	return 1;
+}
 
 
-		int no_difference_distance_1(char *mikri, int length_mikri,char *megali)
-		{
-			int i,diff=0;
-			for (i=0;i<length_mikri;i++)
-				if (mikri[i]!=megali[i])
-				{
-					diff++;
-					if (diff==2)
-						return 0;
-				}
-			return 1;
-		}
+
 
 		void* TrieSearchWord( int tid, void* args ){
 			TrieSearchData *tsd = (TrieSearchData *)args;
@@ -1607,18 +2130,20 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 
 				char update_index_node = 0;
 
-				pthread_mutex_lock( &db_index.tries[wsz]->mutex_node );
+				//pthread_mutex_lock( &db_index.tries[wsz]->mutex_node );
+				// read/write lock inside the function
 				created_index_node = TrieIndexCreateEmptyIfNotExists( db_index.tries[wsz], w, wsz );
 				QueryNodesList *query_nodes;// = created_index_node->query_nodes;
-				pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
+				//pthread_mutex_unlock( &db_index.tries[wsz]->mutex_node );
 
 
-				if( pthread_mutex_trylock( &created_index_node->mutex_node ) != 0 ){
-					locked_nodes[locked_nodes_num++] = created_index_node;
+				//if( pthread_mutex_trylock( &created_index_node->mutex_node ) != 0 ){
+				if( pthread_rwlock_trywrlock( &created_index_node->lock_node ) != 0 ){
+				    locked_nodes[locked_nodes_num++] = created_index_node;
 					continue;
 				}
 
-				if( (query_nodes= created_index_node->query_nodes) == 0 ){
+				if( (query_nodes = created_index_node->query_nodes) == 0 ){
 
 					// WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
 					//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
@@ -1626,29 +2151,29 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 					created_index_node->query_nodes = new QueryNodesList();
 					created_index_node->query_nodes->resize( 128 );
 					created_index_node->query_nodes->clear();
-
+				}
 					// Search the QueryDB and find the matches for the current word
-					TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
-					created_index_node->income_index[wsz][0] = income_indexes[wsz][0];
-					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
-					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
-					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
-					created_index_node->income_index[wsz][1] = income_indexes[wsz][1];
-					created_index_node->income_index[wsz][2] = income_indexes[wsz][2];
-					created_index_node->income_index[wsz][3] = income_indexes[wsz][3];
-					for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
-						if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-							continue;
-						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
-						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
-						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
-						// mark the indexes as fully checked
-						created_index_node->income_index[low_sz][6] = income_indexes[low_sz][6];
-						created_index_node->income_index[low_sz][7] = income_indexes[low_sz][7];
-						created_index_node->income_index[low_sz][8] = income_indexes[low_sz][8];
-					}
-
-				}else{
+//					TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
+//					created_index_node->income_index[wsz][0] = income_indexes[wsz][0];
+//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
+//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
+//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
+//					created_index_node->income_index[wsz][1] = income_indexes[wsz][1];
+//					created_index_node->income_index[wsz][2] = income_indexes[wsz][2];
+//					created_index_node->income_index[wsz][3] = income_indexes[wsz][3];
+//					for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
+//						if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
+//							continue;
+//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
+//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
+//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
+//						// mark the indexes as fully checked
+//						created_index_node->income_index[low_sz][6] = income_indexes[low_sz][6];
+//						created_index_node->income_index[low_sz][7] = income_indexes[low_sz][7];
+//						created_index_node->income_index[low_sz][8] = income_indexes[low_sz][8];
+//					}
+//
+//				}else{
 
 					// TODO - update index
 					// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
@@ -1668,13 +2193,16 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 							for( k=created_index_node->income_index[low_sz][dist_index], ksz=income_indexes[low_sz][dist_index]; k<ksz; k++ ){
 								valid = 1;
 								IncomeQuery *iq = &db_income.queries[low_sz][dist_index].at(k);
-								size1 = iq->wsz - wsz;
 
 
 
+								size1=iq->wsz-wsz;
 
 
-								if ((size1==-3 || size1==3)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==2 || iq->match_dist==1))
+
+										//						if (size1==3||size1==-3)
+										//							printf("ivren");
+									if ((size1==-3 || size1==3)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==2 || iq->match_dist==1))
 																{
 
 
@@ -1800,6 +2328,30 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 
 
 
+													//	if ((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
+								                                              //                  {       if (no_difference_distance_2(w,wsz,iq->word))
+								                                            //                            { created_index_node->query_nodes->push_back(iq->query_node);
+								                                          //      continue;}
+
+
+
+								                                        //        else continue;}
+
+												//		if ((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==3))
+								                                  //                              {
+													//				if (no_difference_distance_3(w,wsz,iq->word))
+								                                          //                              {
+													//					created_index_node->query_nodes->push_back(iq->query_node);
+								                                         //       continue;
+													//				}
+
+
+
+								                                          //      else continue;
+
+
+
+													//}
 
 
 
@@ -1888,8 +2440,10 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 								// OPTIMIZED DIAGONAL with 2 rows
 
 
-								char left, right, *t, xp, yp;
-								previous = _previous;
+
+						        char left, right, *t, xp, yp;
+						        int mask;
+						        previous = _previous;
 								current = _current;
 								previous[0] = 0;
 								for( y=1; y<=iq->wsz; y++ ){
@@ -1897,7 +2451,7 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 									current[y] = 50;
 								}
 								// for each letter of the document word
-								xp = 0;
+								xp = 0;yp=0;
 								for( x=1; x<= wsz; x++ ){
 									left = MAX( 1, x-iq->match_dist );
 									right = MIN( iq->wsz, x+iq->match_dist + 1 );
@@ -1907,25 +2461,32 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 									else
 										current[0] = x;
 									for( y=left; y<=right; y++ ){
-										if( w[xp] == iq->word[yp] ){
+										if( w[x-1] == iq->word[yp] ){
 											current[y] = previous[yp];
 										}else{
-											current[y] = MIN3( previous[yp], previous[y], current[yp] ) + 1;
-//
+											//current[y] = MIN3( previous[yp], previous[y], current[yp] ) + 1;
+
+											current[y] = least( previous[yp], previous[y], current[yp] ) + 1;
+
+//											mask = (previous[yp]-previous[y]) >> 31;
+//											xp = ( (previous[yp]&mask) | (previous[y]&~mask) );
+//											mask = (xp-current[yp]) >> 31;
+//											current[y] = ( (xp&mask) | (current[yp]&~mask) ) + 1;
+
 //											__asm__ (
 //
-//												    "pushq   %%rbp\n\t"
-//												    "movq    %%rsp, %%rbp\n\t"
-//													"movq    8(%%rbp), %%rdx\n\t"
-//												    "movq    12(%%rbp), %%rcx\n\t"
-//												    "movq    16(%%rbp), %%rax\n\t"
-//												    "cmpq    %%rdx, %%rcx\n\t"
+//												    "pushl   %%ebp\n\t"
+//												    "movl    %%esp, %%ebp\n\t"
+//													"movl    8(%%ebp), %%edx\n\t"
+//												    "movl    12(%%ebp), %%ecx\n\t"
+//												    "movl    16(%%ebp), %%eax\n\t"
+//												    "cmpl    %%edx, %%ecx\n\t"
 //												    "leave\n\t"
-//												    "cmovbe  %%rcx, %%rdx\n\t"
-//												    "cmpq    %%rax, %%rdx\n\t"
-//												    "cmovbe  %%rdx, %%rax"
+//												    "cmovbe  %%ecx, %%edx\n\t"
+//												    "cmpl    %%eax, %%edx\n\t"
+//												    "cmovbe  %%edx, %%eax"
 //													 :"=d"(current[y])
-//													 :"a"(previous[y-1]), "b"(previous[y]), "c"(current[y-1])	);
+//													 :"a"(previous[yp]), "b"(previous[y]), "c"(current[yp])	);
 //											current[y]++;
 										}
 										yp++;
@@ -1933,7 +2494,6 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 									t = previous;
 									previous = current;
 									current = t;
-									xp++;
 								}
 								if( previous[ yp ] <= iq->match_dist ){
 									created_index_node->query_nodes->push_back(iq->query_node);
@@ -1992,9 +2552,10 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 					}
 					pthread_mutex_unlock(&doc->mutex_query_ids);
 
-				}// end if update_index
+				//}// end if update_index
 
-				pthread_mutex_unlock( &created_index_node->mutex_node );
+				pthread_rwlock_unlock( &created_index_node->lock_node );
+				//pthread_mutex_unlock( &created_index_node->mutex_node );
 
 
 				//////////////////////////////////////////////
@@ -2008,7 +2569,8 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 			// updated them with the new queries
 			for( i=0; i<locked_nodes_num; i++ ){
 				created_index_node = locked_nodes[i];
-				pthread_mutex_lock( &created_index_node->mutex_node );
+				pthread_rwlock_rdlock( &created_index_node->lock_node );
+				//pthread_mutex_lock( &created_index_node->mutex_node );
 				pthread_mutex_lock(&doc->mutex_query_ids);
 				for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
 					for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
@@ -2016,7 +2578,8 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 					}
 				}
 				pthread_mutex_unlock(&doc->mutex_query_ids);
-				pthread_mutex_unlock( &created_index_node->mutex_node );
+				//pthread_mutex_unlock( &created_index_node->mutex_node );
+				pthread_rwlock_unlock( &created_index_node->lock_node );
 			}
 
 			// check if all jobs are finished
@@ -2029,7 +2592,8 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 			}
 			pthread_mutex_unlock( &doc->mutex_finished_jobs );
 
-			free( tsd );
+			//free( tsd );
+			mt_mempool_free( mt_thread_pool, tsd );
 
 			return 0;
 		}
@@ -2066,7 +2630,9 @@ int difference_one_distance_one(char *mikri,int length_mikri,char *megali)
 
 				batch_words++;
 				if( batch_words == 1 ){
-					tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
+					//tsd = (TrieSearchData*)malloc(sizeof(TrieSearchData));
+					tsd = (TrieSearchData*)mt_mempool_alloc(mt_thread_pool, sizeof(TrieSearchData));
+					//fprintf( stderr, "[%lu] [%p]\n", sizeof(TrieSearchData), tsd );
 					tsd->doc_id = document->doc_id;
 					++total_jobs;
 				}

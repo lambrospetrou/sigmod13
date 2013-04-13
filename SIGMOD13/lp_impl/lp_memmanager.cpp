@@ -8,7 +8,7 @@
 #define TOTAL_WORKERS NUM_THREADS+1
 
 #define WORDS_PROCESSED_BY_THREAD 30
-#define SPARSE_ARRAY_NODE_DATA 9000
+#define SPARSE_ARRAY_NODE_DATA 7000
 
 #define VALID_CHARS 26
 #define MAX_WORD_LENGTH 31
@@ -22,18 +22,18 @@ struct QueryNode{
 typedef std::vector<QueryNode> QueryArrayList;
 
 struct TrieNode{
-	TrieNode* children[VALID_CHARS];
-	QueryArrayList *qids;
-	pthread_mutex_t mutex_node;
 	char wsz;
 	unsigned int income_pos;
+	QueryArrayList *qids;
+	TrieNode* children[VALID_CHARS];
+	pthread_mutex_t mutex_node;
 };
 
 typedef std::vector<TrieNode*> QueryNodesList;
 struct TrieNodeIndex{
 	TrieNodeIndex* children[VALID_CHARS];
 	QueryNodesList *query_nodes;
-	pthread_mutex_t mutex_node;
+	pthread_rwlock_t lock_node;
 	unsigned int income_index[MAX_WORD_LENGTH+1][9];
 };
 
@@ -60,10 +60,11 @@ struct TrieNodeVisited{
 struct SparseArrayNode{
 	SparseArrayNode* next;
 	SparseArrayNode* prev;
-	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 	unsigned int low;
 	unsigned int high;
+	char data[SPARSE_ARRAY_NODE_DATA][MAX_QUERY_WORDS+1];
 };
+
 struct SparseArray{
 	SparseArrayNode* head;
 	SparseArrayNode* tail;
@@ -102,6 +103,7 @@ struct EditNode{
 };
 
 struct lp_tpjob{
+	char dummy;
 	void *args;
 	void *(*func)(int, void *);
 	lp_tpjob *next;
@@ -293,7 +295,7 @@ int main(){
 //	fprintf( stdout, "SparseArray[%lu]\n", sizeof(SparseArray) );
 //	fprintf( stdout, "SpaseArrayNode[%lu]\n", sizeof(SparseArrayNode) );
 //	fprintf( stdout, "TrieNodeVisited[%lu]\n", sizeof(TrieNodeVisited) );
-//	fprintf( stdout, "TrieSearchData[%lu]\n", sizeof(TrieSearchData) );
+	fprintf( stdout, "TrieSearchData[%lu]\n", sizeof(TrieSearchData) );
 //	fprintf( stdout, "QuerySetNode[%lu]\n", sizeof(QuerySetNode) );
 //	fprintf( stdout, "TrieNodeIndex[%lu]\n", sizeof(TrieNodeIndex) );
 //	fprintf( stdout, "TrieNode[%lu]\n", sizeof(TrieNode) );
