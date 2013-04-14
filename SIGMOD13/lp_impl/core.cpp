@@ -2657,7 +2657,7 @@ void* TrieSearchWord( int tid, void* args ){
 
 				// FILL DOCUMENT with QUERY IDS matching this word
 				for (QueryNodesList::iterator it =created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it != end; it++) {
-						local_doc->push_back( *it );
+					local_doc->push_back( *it );
 				}
 
 				//////////////////////////////////////////////
@@ -2683,20 +2683,22 @@ void* TrieSearchWord( int tid, void* args ){
 //				ud->locked_words = locked_nodes;
 //				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(UpdatingDocumentJob), ud );
 //			}else{
-				free( locked_nodes );
-				pthread_mutex_lock(&doc->mutex_query_ids);
-				SparseArrayFill( doc->query_ids, local_doc);
-				pthread_mutex_unlock(&doc->mutex_query_ids);
 
-				// check if all jobs are finished
-				pthread_mutex_lock( &doc->mutex_finished_jobs );
-				doc->finished_jobs = doc->finished_jobs + 1;
-				if( doc->total_jobs == doc->finished_jobs ){
-					doc->total_jobs = -1;
-					//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
-					lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
-				}
-				pthread_mutex_unlock( &doc->mutex_finished_jobs );
+			free( locked_nodes );
+			pthread_mutex_lock(&doc->mutex_query_ids);
+			SparseArrayFill( doc->query_ids, local_doc);
+			pthread_mutex_unlock(&doc->mutex_query_ids);
+
+			// check if all jobs are finished
+			pthread_mutex_lock( &doc->mutex_finished_jobs );
+			doc->finished_jobs = doc->finished_jobs + 1;
+			if( doc->total_jobs == doc->finished_jobs ){
+				doc->total_jobs = -1;
+				//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
+				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
+			}
+			pthread_mutex_unlock( &doc->mutex_finished_jobs );
+
 //			}
 
 			// get the results for the nodes that got updated by other threads
