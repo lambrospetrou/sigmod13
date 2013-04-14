@@ -36,7 +36,7 @@
 
 //////////////////////////////////////////
 
-#define NUM_THREADS 4
+#define NUM_THREADS 24
 #define TOTAL_WORKERS NUM_THREADS+1
 
 #define WORDS_PROCESSED_BY_THREAD 50
