@@ -39,8 +39,8 @@
 #define NUM_THREADS 4
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 30
-#define SPARSE_ARRAY_NODE_DATA 50000
+#define WORDS_PROCESSED_BY_THREAD 50
+#define SPARSE_ARRAY_NODE_DATA 20000
 
 #define VALID_CHARS 26
 
@@ -105,6 +105,7 @@ struct TrieNodeIndex{
 	QueryNodesList *query_nodes;
 	pthread_rwlock_t lock_node;
 	unsigned int income_index[MAX_WORD_LENGTH+1][9];
+	unsigned int updated_till_batch;
 };
 struct IndexDB{
 	TrieNodeIndex *tries[MAX_WORD_LENGTH+1];
@@ -210,6 +211,12 @@ struct EditNode{
 	char letter;
 };
 
+struct UpdatingDoc{
+	unsigned int locked_words_num;
+	TrieNodeIndex **locked_words;
+	Document *doc;
+	QueryNodesList *local_doc;
+};
 
 
 
@@ -883,6 +890,7 @@ QuerySet *querySet; // std::vector<QuerySetNode*>
 QueryDB db_query;
 IndexDB db_index;
 IncomeQueryDB db_income;
+unsigned int current_document_batch = 0;
 //pthread_mutex_t mutex_dbincome = PTHREAD_MUTEX_INITIALIZER;
 
 DocResults *docResults;
@@ -917,7 +925,7 @@ TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qi
 TrieNode* TrieCreateEmptyIfNotExists( TrieNode* node, const char* word, char word_sz );
 QueryArrayList* TrieFind( TrieNode* node, const char* word, char word_sz );
 TrieNode* TrieFindID( TrieNode* root, const char* word, char word_sz, unsigned int query_id, char pos );
-void TrieExactSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, char word_sz, Document*doc );
+void TrieExactSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, char word_sz, QueryNodesList *local_doc );
 void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
 void TrieEditSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost );
 
@@ -1212,7 +1220,8 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 	if( lastMethodCalled != 3 ){
 		synchronize_complete(threadpool);
 		lastMethodCalled = 3;
-		time_ = gettime();
+		current_document_batch++;
+		//time_ = gettime();
 		//fprintf( stderr, "[%u]\n", doc_id );
 	}
 
@@ -1502,13 +1511,17 @@ void TrieNode_Destructor( TrieNode* node ){
 }
 TrieNode* TrieInsert( TrieNode* node, const char* word, char word_sz, QueryID qid, char word_pos ){
 	char ptr=0;
-	char pos;
+	//char pos;
 	while( ptr < word_sz ){
-		pos = word[ptr] - 'a';
-		if( node->children[pos] == 0 ){
-			node->children[pos] = TrieNode_Constructor();
+//		pos = word[ptr] - 'a';
+//		if( node->children[pos] == 0 ){
+//			node->children[pos] = TrieNode_Constructor();
+//		}
+//		node = node->children[pos];
+		if( node->children[word[ptr] - 'a'] == 0 ){
+			node->children[word[ptr] - 'a'] = TrieNode_Constructor();
 		}
-		node = node->children[pos];
+		node = node->children[word[ptr] - 'a'];
 		ptr++;
 	}
 	if( !node->qids ){
@@ -1526,10 +1539,10 @@ TrieNode* TrieCreateEmptyIfNotExists( TrieNode* node, const char* word, char wor
 	char pos;
 	while( ptr < word_sz ){
 		pos = word[ptr] - 'a';
-		if( node->children[pos] == 0 ){
-			node->children[pos] = TrieNode_Constructor();
+		if( node->children[word[ptr] - 'a'] == 0 ){
+			node->children[word[ptr] - 'a'] = TrieNode_Constructor();
 		}
-		node = node->children[pos];
+		node = node->children[word[ptr] - 'a'];
 		ptr++;
 	}
 	return node;
@@ -1571,7 +1584,7 @@ TrieNode* TrieFindID( TrieNode* root, const char* word, char word_sz, unsigned i
 	}
 	return 0;
 }
-void TrieExactSearchWord( TrieNodeIndex* created_index_node,TrieNode* root, const char* word, char word_sz, Document*doc ){
+void TrieExactSearchWord( TrieNodeIndex* created_index_node,TrieNode* root, const char* word, char word_sz, QueryNodesList *local_doc ){
 	//fprintf( stderr, "[1] [%p] [%p] [%.*s] [%d] [%p]\n", lockmech, root, word_sz, word, 0, results );
 	char p, i, found=1;
 	for( p=0; p<word_sz; p++ ){
@@ -1585,12 +1598,12 @@ void TrieExactSearchWord( TrieNodeIndex* created_index_node,TrieNode* root, cons
 	}
 	if( found && root->qids ){
 		// WE HAVE A MATCH SO get the List of the query ids and add them to the result
-		pthread_mutex_lock( &doc->mutex_query_ids );
-		//created_index_node->query_nodes->push_back(root);
-		for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
-			SparseArraySet( doc->query_ids, it->qid, it->pos );
-		}
-		pthread_mutex_unlock( &doc->mutex_query_ids );
+//		pthread_mutex_lock( &doc->mutex_query_ids );
+//		for (QueryArrayList::iterator it = root->qids->begin(), end = root->qids->end(); it != end; it++) {
+//			SparseArraySet( doc->query_ids, it->qid, it->pos );
+//		}
+//		pthread_mutex_unlock( &doc->mutex_query_ids );
+		local_doc->push_back( root );
 	}
 }
 void TrieHammingSearchWord( TrieNodeIndex* created_index_node, TrieNode* node, const char* word, int word_sz, Document*doc, char maxCost ){
@@ -1732,6 +1745,7 @@ inline TrieNodeIndex* TrieNodeIndex_Constructor(){
 	//pthread_mutex_init( &n->mutex_node, NULL );
 	n->lock_node = PTHREAD_RWLOCK_INITIALIZER;
 	memset( n->income_index, 0, (MAX_WORD_LENGTH+1) * sizeof(unsigned int) * 9 );
+	n->updated_till_batch = 0;
 	return n;
 }
 void TrieNodeIndex_Destructor( TrieNodeIndex* node ){
@@ -1750,11 +1764,15 @@ void TrieNodeIndex_Destructor( TrieNodeIndex* node ){
 TrieNodeIndex* TrieIndexCreateEmptyIfNotExists( TrieNodeIndex* node, const char* word, char word_sz ){
 	char ptr=0, flag;
 	char pos;
+	TrieNodeIndex *n;
 	while( ptr < word_sz ){
 		flag = 0;
 		pos = word[ptr] - 'a';
 		if( node->children[pos] == 0 ){
-			__sync_val_compare_and_swap( node->children + pos, 0, TrieNodeIndex_Constructor() );
+			n = TrieNodeIndex_Constructor();
+			if( !__sync_bool_compare_and_swap( node->children + pos, 0, n ) ){
+				free( n );
+			}
 		}
 
 		node = node->children[pos];
@@ -1795,19 +1813,23 @@ void TrieNodeVisited_Destructor( TrieNodeVisited* node ){
 }
 char TrieVisitedIS( TrieNodeVisited* node, const char* word, char word_sz ){
 	// Returns 0 if new word added or 1 if existed
-	char ptr, pos, existed = 1;
+	char ptr;//, pos;
 	for( ptr=0; ptr<word_sz; ptr++ ){
-		pos = word[ptr] - 'a';
-		if( node->children[pos] == 0 ){
-			node->children[pos] = TrieNodeVisited_Constructor();
+//		pos = word[ptr] - 'a';
+//		if( node->children[pos] == 0 ){
+//			node->children[pos] = TrieNodeVisited_Constructor();
+//		}
+//		node = node->children[pos];
+		if (node->children[word[ptr] - 'a'] == 0) {
+			node->children[word[ptr] - 'a'] = TrieNodeVisited_Constructor();
 		}
-		node = node->children[pos];
+		node = node->children[word[ptr] - 'a'];
 	}
 	if( !node->exists ){
-		existed = 0;
 		node->exists = 1;
+		return 0;
 	}
-	return existed;
+	return 1;
 }
 void TrieVisitedClear(TrieNodeVisited* node){
 	for( char i=0; i<VALID_CHARS; i++ ){
@@ -1950,7 +1972,7 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 			cnode->data[ index - cnode->low ][pos] = 1;
 			//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
 		}
-		unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
+unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 			unsigned int nids = querySet->size();
 			unsigned int *final_ids = (unsigned int*)malloc( sizeof(unsigned int)*nids );
 			unsigned int total_found=0, row;
@@ -1971,6 +1993,92 @@ void SparseArraySet( SparseArray* sa, unsigned int index, char pos ){
 			*total = total_found;
 			return final_ids;
 		}
+void SparseArrayFill( SparseArray* sa, QueryNodesList *query_nodes ){
+	SparseArrayNode* prev=sa->head, *cnode;
+    unsigned int index, pos; // qid, pos
+
+	for( QueryNodesList::iterator it=query_nodes->begin(), end=query_nodes->end(); it!=end; it++ ){
+		for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
+
+			index = qit->qid;
+			pos = qit->pos;
+
+		if( index < sa->mid_high ){
+			// START FROM THE HEAD AND SEARCH FORWARD
+
+			for( cnode=sa->head; cnode && cnode->high < index ; cnode=cnode->next ){
+				prev = cnode;
+			}
+			// the case where we finished the array without results
+			// OR
+			// we must create a node before this one because this is a block for bigger ids
+			if( cnode == 0 || cnode->low > index ){
+				cnode = SparseArrayNode_Constructor();
+				cnode->next = prev->next;
+				cnode->prev = prev;
+				prev->next = cnode;
+				if( cnode->next != 0 ){
+					cnode->next->prev = cnode;
+				}
+				cnode->low = ( (index / SPARSE_ARRAY_NODE_DATA)*SPARSE_ARRAY_NODE_DATA );
+				cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA-1;
+				sa->num_nodes++;
+				//if( sa->num_nodes % 2 == 1 ){
+				if( (sa->num_nodes & 1) == 1 ){
+					// we must increase the mid_high
+					unsigned int i=0,sz=(sa->num_nodes >> 2);
+					for( prev=sa->head; i < sz ; i++ ){
+						prev = prev->next;
+					}
+					sa->mid_high = prev->high;
+				}
+			}
+		}else{
+			// START FROM THE TAIL AND SEARCH BACKWARD
+			for( cnode=sa->tail; cnode->low > index ; cnode=cnode->prev ){
+				// move back
+			}
+			// the case where we stopped at a node with HIGH less than index and we must create a new node cause LOW is also less than index
+			// OR
+			// the case where we stopped at the right node
+			if( cnode->high < index ){
+				prev = cnode;
+				cnode = SparseArrayNode_Constructor();
+				if( prev == sa->tail ){
+					sa->tail = cnode;
+				}
+				cnode->next = prev->next;
+				cnode->prev = prev;
+				prev->next = cnode;
+				if (cnode->next != 0) {
+					cnode->next->prev = cnode;
+				}
+				cnode->low = ((index / SPARSE_ARRAY_NODE_DATA)* SPARSE_ARRAY_NODE_DATA);
+				cnode->high = cnode->low + SPARSE_ARRAY_NODE_DATA - 1;
+				sa->num_nodes++;
+				//if (sa->num_nodes % 2 == 1) {
+				if ((sa->num_nodes & 1) == 1) {
+					// we must increase the mid_high
+					unsigned int i = 0, sz=(sa->num_nodes >> 2);
+					for (prev = sa->head; i < sz; i++) {
+						prev = prev->next;
+					}
+					sa->mid_high = prev->high;
+				}
+
+			}
+			}
+
+
+			// cnode holds the block where we need to insert the value
+			cnode->data[ index - cnode->low ][MAX_QUERY_WORDS] = 1;
+			cnode->data[ index - cnode->low ][pos] = 1;
+
+		}
+	}
+
+			//fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
+}
 
 		// worker_thread functions
 
@@ -1993,7 +2101,6 @@ void* FinishingJob( int tid, void* args ){
 
 			pthread_mutex_lock( &mutex_doc_results );
 			docResults->push_back(docr);
-			//fprintf( stderr, "finished doc[%d] doc[%d]\n", docr.docid, docResults->back().docid );
 			pthread_mutex_unlock( &mutex_doc_results );
 			pthread_cond_signal( &cond_doc_results );
 
@@ -2002,6 +2109,44 @@ void* FinishingJob( int tid, void* args ){
 
 			return 0;
 		}
+
+
+void* UpdatingDocumentJob( int tid, void* args ){
+    UpdatingDoc *ud = (UpdatingDoc*)args;
+	unsigned int i;
+	TrieNodeIndex *created_index_node;
+
+	for( i=0; i<ud->locked_words_num; i++ ){
+		created_index_node = ud->locked_words[i];
+		pthread_rwlock_rdlock( &created_index_node->lock_node );
+		for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+			ud->local_doc->push_back( *it );
+		}
+		pthread_rwlock_unlock( &created_index_node->lock_node );
+	}
+
+
+	pthread_mutex_lock(&ud->doc->mutex_query_ids);
+	SparseArrayFill( ud->doc->query_ids, ud->local_doc);
+	pthread_mutex_unlock(&ud->doc->mutex_query_ids);
+
+	// check if all jobs are finished
+	pthread_mutex_lock( &ud->doc->mutex_finished_jobs );
+	ud->doc->finished_jobs = ud->doc->finished_jobs + 1;
+	if( ud->doc->total_jobs == ud->doc->finished_jobs ){
+		ud->doc->total_jobs = -1;
+		//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
+		lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[ud->doc->doc_id]->doc_id );
+	}
+	pthread_mutex_unlock( &ud->doc->mutex_finished_jobs );
+
+	free( ud->local_doc );
+	free( ud->locked_words );
+	free( ud );
+}
+
+
+
 
 
 int difference_one_distance_one(char *mikri, int length_mikri, char *megali) {
@@ -2136,11 +2281,10 @@ void* TrieSearchWord( int tid, void* args ){
 			char wsz;
 			Document *doc = documents[tsd->doc_id];
 
-			QueryArrayList local_doc;
-			local_doc.reserve( 100 );
+			QueryNodesList *local_doc = new QueryNodesList();
 
 			TrieNodeIndex *created_index_node;
-			TrieNodeIndex *locked_nodes[WORDS_PROCESSED_BY_THREAD];
+			TrieNodeIndex **locked_nodes = (TrieNodeIndex**)malloc(sizeof(TrieNodeIndex*)*WORDS_PROCESSED_BY_THREAD);
 			unsigned int locked_nodes_num=0;
 
 			unsigned int i,j,k,ksz;
@@ -2167,10 +2311,7 @@ void* TrieSearchWord( int tid, void* args ){
 				// START THE WORD PROCESSING
 				//////////////////////////////////////////////
 
-				TrieExactSearchWord( 0, db_query.tries[wsz].tries[0], w, wsz, doc );
-//				TrieHammingSearchWord( 0, db_query.tries[wsz].tries[2], w,wsz, doc, 1 );
-//				TrieHammingSearchWord( 0, db_query.tries[wsz].tries[3], w,wsz, doc, 2 );
-//				TrieHammingSearchWord( 0, db_query.tries[wsz].tries[4], w,wsz, doc, 3 );
+				TrieExactSearchWord( 0, db_query.tries[wsz].tries[0], w, wsz, local_doc );
 
 				// read/write lock inside the function
 				created_index_node = TrieIndexCreateEmptyIfNotExists( db_index.tries[wsz], w, wsz );
@@ -2191,40 +2332,19 @@ void* TrieSearchWord( int tid, void* args ){
 					created_index_node->query_nodes = new QueryNodesList();
 					created_index_node->query_nodes->reserve( 128 );
 				}
-					// Search the QueryDB and find the matches for the current word
-//					TrieExactSearchWord( created_index_node, db_query.tries[wsz].tries[0], w, wsz, doc );
-//					created_index_node->income_index[wsz][0] = income_indexes[wsz][0];
-//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[2], w, wsz, doc, 1 );
-//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[3], w, wsz, doc, 2 );
-//					TrieHammingSearchWord( created_index_node, db_query.tries[wsz].tries[4], w, wsz, doc, 3 );
-//					created_index_node->income_index[wsz][1] = income_indexes[wsz][1];
-//					created_index_node->income_index[wsz][2] = income_indexes[wsz][2];
-//					created_index_node->income_index[wsz][3] = income_indexes[wsz][3];
-//					for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++   ){
-//						if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
-//							continue;
-//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[6], w, wsz, doc, 1 );
-//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[7], w, wsz, doc, 2 );
-//						TrieEditSearchWord( created_index_node, db_query.tries[low_sz].tries[8], w, wsz, doc, 3 );
-//						// mark the indexes as fully checked
-//						created_index_node->income_index[low_sz][6] = income_indexes[low_sz][6];
-//						created_index_node->income_index[low_sz][7] = income_indexes[low_sz][7];
-//						created_index_node->income_index[low_sz][8] = income_indexes[low_sz][8];
-//					}
-//
-//				}else{
 
+				if( current_document_batch > created_index_node->updated_till_batch ){
 					// TODO - update index
 					// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
 					// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
 					// THIS WORD WAS PROCESSED. exact, hamming and edit matching
-					char valid, cost;
+					//char valid, cost;
 					int size1;
 					char matrix[MAX_WORD_LENGTH+1][MAX_WORD_LENGTH+1];
 //					char *previous, *current;
 //					char _previous[MAX_WORD_LENGTH+1];
 //					char _current[MAX_WORD_LENGTH+1];
-					char left, right, *t, xp, yp;
+					//char left, right, *t, xp, yp;
 					IncomeQuery *iq;
 					for( int low_sz=wsz-3, high_sz=wsz+3; low_sz<=high_sz; low_sz++ ){
 						if( low_sz < MIN_WORD_LENGTH || low_sz > MAX_WORD_LENGTH )
@@ -2232,210 +2352,105 @@ void* TrieSearchWord( int tid, void* args ){
 						for( int dist_index=6; dist_index<9; dist_index++ ){
 							// check if we need to update the index word for queries with low_sz size words
 							for( k=created_index_node->income_index[low_sz][dist_index], ksz=income_indexes[low_sz][dist_index]; k<ksz; k++ ){
-								valid = 1;
 								iq = &db_income.queries[low_sz][dist_index].at(k);
 
 
 
-								  size1=iq->wsz-wsz;
+							    size1=iq->wsz-wsz;
+
+					if ((size1 == -3 || size1 == 3)	 && (iq->match_dist == 2 || iq->match_dist == 1)) {
+						continue;
+
+					} else if ((size1 == -3)&& iq->match_dist == 3) {
+
+						if (difference_three_distance_3(iq->word, iq->wsz, w))//apothikefse ta apotelesmata kai mpla mpla kai sinexise
+								{
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						}
+
+						else
+							continue;
+					} else if ((size1 == 3)  && iq->match_dist == 3) {
+						if (difference_three_distance_3(w, wsz, iq->word)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						}
+
+						else
+							continue;
+					} else if ((size1 == -2 || size1 == 2)  && (iq->match_dist == 1))
+						continue;
+					else if ((size1 == -2)  && (iq->match_dist == 2)) {
+						if (difference_two_distance_2(iq->word, iq->wsz, w)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						}
+
+						else
+							continue;
+					} else if ((size1 == 2)  && (iq->match_dist == 2)) {
+
+						if (difference_two_distance_2(w, wsz, iq->word)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						}
+
+						else
+							continue;
+					}
+
+					if ((size1 == 1) && (iq->match_dist == 1)) {
+						if (difference_one_distance_one(w, wsz, iq->word)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						} else
+							continue;
+					}
+
+					if ((size1 == -1) &&  (iq->match_dist == 1)) {
+						if (difference_one_distance_one(iq->word, iq->wsz, w)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						} else
+							continue;
+					} else if ((size1 == -1)&& (iq->match_dist == 2)) {
+						{
+							if (difference_1_distance_2(iq->word, iq->wsz, w))
+								created_index_node->query_nodes->push_back(
+										iq->query_node);
+							continue;
+
+						}
+					}
+
+					else if ((size1 == 1) &&(iq->match_dist == 2)) {
+						{
+							if (difference_1_distance_2(w, wsz, iq->word))
+								created_index_node->query_nodes->push_back(
+										iq->query_node);
+							continue;
+
+						}
+					}
+
+					if ((size1 == 0) && (iq->match_dist == 1)) {
+						if (no_difference_distance_1(w, wsz, iq->word)) {
+							created_index_node->query_nodes->push_back(
+									iq->query_node);
+							continue;
+						}
+
+						else
+							continue;
+					}
 
-
-
-								        //                        if (size1==3||size1==-3)
-								        //                            printf("ivren");
-								    if ((size1==-3 || size1==3)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==2 || iq->match_dist==1))
-								                                {
-
-
-
-								                                //    printf("prosperna ");
-								                                    continue;
-
-
-
-								                                }
-								                                else if ((size1==-3 )&&iq->match_type==MT_EDIT_DIST && iq->match_dist==3)
-								                                {
-
-								                if (difference_three_distance_3(iq->word,iq->wsz,w))//apothikefse ta apotelesmata kai mpla mpla kai sinexise
-								                                             { created_index_node->query_nodes->push_back(iq->query_node);
-								                        continue;}
-
-
-
-								                        else continue;}
-								                            //        difference_three_distance_3(iq->word,iq->wsz,w);
-
-								            //                    }
-								                                else if ((size1==3)&&iq->match_type==MT_EDIT_DIST && iq->match_dist==3)
-								                                {
-
-								                                    //if (difference_three_distance_3(w,wsz,iq->word)==1)//apothikefse ta apotelesmata kai mpla mpla kai sinexise
-								                                    //else continue;
-								                                if (difference_three_distance_3(w,wsz,iq->word))
-								                            { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                continue;}
-
-
-
-								                                                else continue;}
-								//                                    printf("difference_three_distance_3");
-
-								                        //        }
-								                                else if ((size1==-2 || size1==2)&& iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
-								                                    continue;
-								                                else if ((size1==-2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
-								                                {
-								                                if (difference_two_distance_2(iq->word,iq->wsz,w))
-								                                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                continue;}
-
-
-
-								                                                else continue;}
-
-								//                                    printf("difference_two_distance_2");
-								                        //        }
-								                                else if ((size1==2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
-								                                {
-
-
-								                                if (difference_two_distance_2(w,wsz,iq->word))
-								                                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                continue;}
-
-
-
-								                                                else continue;}
-
-								//                                    printf("difference_two_distance_2");
-								                        //        }
-								                //        else if((low_sz==1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
-								                //                {
-								                //                if(difference_one_distance_one(w,wsz,iq->wsz,iq->word))
-								                //                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                  //              continue;}
-
-
-
-								                                    //            else continue;
-								//                                    printf("difference_one_distance_one");
-								                //                }
-								                    //    else
-
-
-
-								                    if((size1==1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
-								                                                                {
-								                                                if (difference_one_distance_one(w,wsz,iq->word))
-								                                                                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                                 continue;}
-								                                                else continue;
-
-								//                              //                                      printf("difference_one_distance_one");
-								                                                                }
-
-								                    if((size1==-1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
-								                                {
-								                        if (difference_one_distance_one(iq->word,iq->wsz,w))
-								                                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                            continue;}
-								                                                else continue;
-
-								//                //                    printf("difference_one_distance_one");
-								                                }
-								                                else if((size1==-1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
-								                                {
-
-								//                                    printf("no_difference_distance_1");
-								                            {        if (difference_1_distance_2(iq->word, iq->wsz,w))
-								                                     created_index_node->query_nodes->push_back(iq->query_node);
-								                                                                continue;
-
-								}
-								}
-
-								                                else if((size1==1)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
-								                                                                {
-
-								  //                                                                    printf("no_difference_distance_1");
-								                                                        {               if (difference_1_distance_2(w,wsz,iq->word))
-								                                                                         created_index_node->query_nodes->push_back(iq->query_node);
-								                                                                    continue;
-
-								}
-								}
-
-
-								  //                                                         else if((size1==-2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==3))
-								    //                                                            {
-
-								//                                                                      printf("no_difference_distance_1");
-								//                                                                        if (iq->wsz<wsz)
-								  //                                                      {               if (difference_2_distance_3(iq->word, iq->wsz,w))
-								    //                                                                    { created_index_node->query_nodes->push_back(iq->query_node);
-								      //                                          continue;}
-
-								//}
-								//}
-
-								                                                   //             else if((size1==2)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==3))
-								                                                     //           {
-
-								//                                                                      printf("no_difference_distance_1");
-								                                             //                           if (iq->wsz<wsz)
-								                                          //              {               if (difference_2_distance_3(w,wsz,iq->word))
-								                                        //                                { created_index_node->query_nodes->push_back(iq->query_node);
-								                                      //          continue;}
-
-								//}
-								//}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-								                                    //            else continue;}
-								                //                    else{
-								                                    if ((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==1))
-								                                {    if (no_difference_distance_1(w,wsz,iq->word))
-								                                    { created_index_node->query_nodes->push_back(iq->query_node);
-								                                                continue;}
-
-
-
-								                                                else continue;}
-
-
-
-
-//								                    if ((size1==0)&&iq->match_type==MT_EDIT_DIST && (iq->match_dist==2))
-//
-//								                                                               {       if (no_difference_distance_2(w,wsz,iq->word))
-//								                                                                         created_index_node->query_nodes->push_back(iq->query_node);
-//								                                                continue;
-//								}
 
 
 
@@ -2473,52 +2488,52 @@ void* TrieSearchWord( int tid, void* args ){
 
 
 								// normal calculation with a matrix N*M
-								//        					matrix[0][0] = 0;
-								//        					for( y=1; y<=iq->wsz; y++ )
-								//        						matrix[0][y] = y;
-								//        					for (x = 1; x <= wsz; x++) {
-								//								matrix[x][0] = x;
-								//								for (y = 1; y <= iq->wsz; y++) {
-								//									if (w[x - 1] == iq->word[y - 1]) {
-								//										matrix[x][y] = matrix[x-1][y - 1];
-								//									} else {
-								//										matrix[x][y] = MIN3(matrix[x][y-1] , matrix[x-1][y], matrix[x-1][y-1] ) + 1;
-								//									}
-								//								}
-								//							}
-								//        					if( matrix[x-1][iq->wsz] <= iq->match_dist ){
-								//        						created_index_node->query_nodes->push_back(iq->query_node);
-								//        					}
+								        					matrix[0][0] = 0;
+								        					for( y=1; y<=iq->wsz; y++ )
+								        						matrix[0][y] = y;
+								        					for (x = 1; x <= wsz; x++) {
+																matrix[x][0] = x;
+																for (y = 1; y <= iq->wsz; y++) {
+																	if (w[x - 1] == iq->word[y - 1]) {
+																		matrix[x][y] = matrix[x-1][y - 1];
+																	} else {
+																		matrix[x][y] = MIN3(matrix[x][y-1] , matrix[x-1][y], matrix[x-1][y-1] ) + 1;
+																	}
+																}
+															}
+								        					if( matrix[x-1][iq->wsz] <= iq->match_dist ){
+								        						created_index_node->query_nodes->push_back(iq->query_node);
+								        					}
 
 								// OPTIMIZED EDIT DISTANCE FOR DIAGONAL CALCULATION ONLY
-								        					char left, right;
-								        					matrix[0][0] = 0;
-								        					for( y=1; y<=iq->wsz; y++ ){
-								        						matrix[0][y] = y;
-								        					}
-								        					for( x=1; x<=wsz; x++ ){
-								        						matrix[x][0] = x;
-								        					}
-								        					// for each letter of the document word
-								        					for( x=1; x<= wsz; x++ ){
-								        						left = MAX( 1, x-iq->match_dist );
-								        						right = MIN( iq->wsz, x+iq->match_dist + 1 );
-								        						if( right < iq->wsz )
-								        							matrix[x][right+1] = 50;
-								        						if( left > 1 ){
-								        							matrix[x][left-1] = 50;
-								        						}
-								        						for( y=left; y<=right; y++ ){
-								        							if( w[x-1] == iq->word[y-1] ){
-								        								matrix[x][y] = matrix[x-1][y-1];
-								        							}else{
-								        								matrix[x][y] = MIN3( matrix[x-1][y-1], matrix[x-1][y], matrix[x][y-1] ) + 1;
-								        							}
-								        						}
-								        					}
-								        			        if( matrix[ x-1 ][ y-1 ] <= iq->match_dist ){
-								        					   	created_index_node->query_nodes->push_back(iq->query_node);
-								        					}
+//								        					char left, right;
+//								        					matrix[0][0] = 0;
+//								        					for( y=1; y<=iq->wsz; y++ ){
+//								        						matrix[0][y] = y;
+//								        					}
+//								        					for( x=1; x<=wsz; x++ ){
+//								        						matrix[x][0] = x;
+//								        					}
+//								        					// for each letter of the document word
+//								        					for( x=1; x<= wsz; x++ ){
+//								        						left = MAX( 1, x-iq->match_dist );
+//								        						right = MIN( iq->wsz, x+iq->match_dist + 1 );
+//								        						if( right < iq->wsz )
+//								        							matrix[x][right+1] = 50;
+//								        						if( left > 1 ){
+//								        							matrix[x][left-1] = 50;
+//								        						}
+//								        						for( y=left; y<=right; y++ ){
+//								        							if( w[x-1] == iq->word[y-1] ){
+//								        								matrix[x][y] = matrix[x-1][y-1];
+//								        							}else{
+//								        								matrix[x][y] = MIN3( matrix[x-1][y-1], matrix[x-1][y], matrix[x][y-1] ) + 1;
+//								        							}
+//								        						}
+//								        					}
+//								        			        if( matrix[ x-1 ][ y-1 ] <= iq->match_dist ){
+//								        					   	created_index_node->query_nodes->push_back(iq->query_node);
+//								        					}
 
 								// OPTIMIZED DIAGONAL with 2 rows
 //						        previous = _previous;
@@ -2584,7 +2599,7 @@ void* TrieSearchWord( int tid, void* args ){
 					// check hamming
 					for( unsigned int dist_index=2; dist_index<5; dist_index++ ){
 						for (k = created_index_node->income_index[wsz][dist_index], ksz =income_indexes[wsz][dist_index]; k < ksz; k++) {
-							IncomeQuery *iq = &db_income.queries[wsz][dist_index].at(k);
+							iq = &db_income.queries[wsz][dist_index].at(k);
 							if( iq->wsz != wsz ) continue; // next word
 							char cost=0;
 							for( x=0; x<wsz;x++ ){
@@ -2602,19 +2617,16 @@ void* TrieSearchWord( int tid, void* args ){
 						created_index_node->income_index[wsz][dist_index] = income_indexes[wsz][dist_index];
 					}
 
-				//}// end if update_index
+
+					created_index_node->updated_till_batch = current_document_batch;
+			    }// end if update needed
 
 				pthread_rwlock_unlock( &created_index_node->lock_node );
 
 				// FILL DOCUMENT with QUERY IDS matching this word
-		for (QueryNodesList::iterator it =
-				created_index_node->query_nodes->begin(), end =
-				created_index_node->query_nodes->end(); it != end; it++) {
-			for (QueryArrayList::iterator qit = (*it)->qids->begin(), qend =
-					(*it)->qids->end(); qit != qend; qit++) {
-				local_doc.push_back( *qit );
-			}
-		}
+				for (QueryNodesList::iterator it =created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it != end; it++) {
+						local_doc->push_back( *it );
+				}
 
 				//////////////////////////////////////////////
 				// WORD PROCESSING END
@@ -2622,40 +2634,62 @@ void* TrieSearchWord( int tid, void* args ){
 
 			}
 
+			if( locked_nodes_num > 0 ){
+				UpdatingDoc *ud = (UpdatingDoc*)malloc(sizeof(UpdatingDoc));
+				ud->doc = doc;
+				ud->local_doc = local_doc;
+				ud->locked_words_num = locked_nodes_num;
+				ud->locked_words = locked_nodes;
+				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(UpdatingDocumentJob), ud );
+			}else{
+				free( locked_nodes );
+				pthread_mutex_lock(&doc->mutex_query_ids);
+				SparseArrayFill( doc->query_ids, local_doc);
+				pthread_mutex_unlock(&doc->mutex_query_ids);
+
+				// check if all jobs are finished
+				pthread_mutex_lock( &doc->mutex_finished_jobs );
+				doc->finished_jobs = doc->finished_jobs + 1;
+				if( doc->total_jobs == doc->finished_jobs ){
+					doc->total_jobs = -1;
+					//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
+					lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
+				}
+				pthread_mutex_unlock( &doc->mutex_finished_jobs );
+			}
+
 			// get the results for the nodes that got updated by other threads
 			// if they were locked previously it means that a thread in this MatchDocuments() batch
 			// updated them with the new queries
-			for( i=0; i<locked_nodes_num; i++ ){
-				created_index_node = locked_nodes[i];
-				pthread_rwlock_rdlock( &created_index_node->lock_node );
-				//pthread_mutex_lock(&doc->mutex_query_ids);
-				for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
-					for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
-						//SparseArraySet( doc->query_ids, qit->qid, qit->pos );
-						local_doc.push_back( *qit );
-					}
-				}
-				//pthread_mutex_unlock(&doc->mutex_query_ids);
-				pthread_rwlock_unlock( &created_index_node->lock_node );
-			}
-
-
-			pthread_mutex_lock(&doc->mutex_query_ids);
-				for( QueryArrayList::iterator qit=local_doc.begin(), qend=local_doc.end(); qit!=qend; qit++ ){
-					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
-				}
-			pthread_mutex_unlock(&doc->mutex_query_ids);
-
-
-			// check if all jobs are finished
-			pthread_mutex_lock( &doc->mutex_finished_jobs );
-			doc->finished_jobs = doc->finished_jobs + 1;
-			if( doc->total_jobs == doc->finished_jobs ){
-				doc->total_jobs = -1;
-				//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
-				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
-			}
-			pthread_mutex_unlock( &doc->mutex_finished_jobs );
+//			for( i=0; i<locked_nodes_num; i++ ){
+//				created_index_node = locked_nodes[i];
+//				pthread_rwlock_rdlock( &created_index_node->lock_node );
+//				for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+//					local_doc.push_back( *it );
+//				}
+//				pthread_rwlock_unlock( &created_index_node->lock_node );
+//			}
+//
+//
+//			pthread_mutex_lock(&doc->mutex_query_ids);
+////			for( QueryNodesList::iterator it=local_doc.begin(), end=local_doc.end(); it!=end; it++ ){
+////				for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
+////					SparseArraySet( doc->query_ids, qit->qid, qit->pos );
+////				}
+////			}
+//			SparseArrayFill( doc->query_ids, &local_doc);
+//			pthread_mutex_unlock(&doc->mutex_query_ids);
+//
+//
+//			// check if all jobs are finished
+//			pthread_mutex_lock( &doc->mutex_finished_jobs );
+//			doc->finished_jobs = doc->finished_jobs + 1;
+//			if( doc->total_jobs == doc->finished_jobs ){
+//				doc->total_jobs = -1;
+//				//fprintf( stderr, "[%d]", *(&tsd->doc_id) );
+//				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
+//			}
+//			pthread_mutex_unlock( &doc->mutex_finished_jobs );
 
 			free( tsd );
 			//mt_mempool_free( mt_thread_pool, tsd );
