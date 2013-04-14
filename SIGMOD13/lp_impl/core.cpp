@@ -39,8 +39,8 @@
 #define NUM_THREADS 24
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 50
-#define SPARSE_ARRAY_NODE_DATA 20000
+#define WORDS_PROCESSED_BY_THREAD 400
+#define SPARSE_ARRAY_NODE_DATA 10000
 
 #define VALID_CHARS 26
 
@@ -157,7 +157,6 @@ struct SparseArray{
 
 struct Document{
 	char *doc; // might be faster if not fixed size
-	//char doc[MAX_DOC_LENGTH];
 	DocID doc_id;
 	int total_jobs;
 	int finished_jobs;
@@ -165,6 +164,9 @@ struct Document{
 	pthread_mutex_t mutex_finished_jobs;
 	SparseArray* query_ids;
 	pthread_mutex_t mutex_query_ids;
+	char locked_lock;
+	unsigned int locked_words_num;
+	TrieNodeIndex *locked_words[ 1000 ];
 };
 
 struct DocumentHandlerNode{
@@ -1244,6 +1246,7 @@ ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_
 {
 
 	DocResultsNode dr;
+
 	pthread_mutex_lock( &mutex_doc_results );
 	while( docResults->size() < 1 ){
 		pthread_cond_wait( &cond_doc_results, &mutex_doc_results );
@@ -1854,6 +1857,9 @@ inline Document* DocumentConstructor(){
 	pthread_mutex_init( &doc->mutex_finished_jobs, NULL );
 	pthread_mutex_init( &doc->mutex_query_ids, NULL );
 	doc->query_ids = SparseArray_Constructor();
+
+	doc->locked_lock = 0;
+	doc->locked_words_num = 0;
 	return doc;
 }
 void DocumentDestructor( Document *doc ){
@@ -2090,6 +2096,34 @@ void* FinishingJob( int tid, void* args ){
 
 			Document* doc = documents[doch->doc_id];
 
+//			if( doc->locked_words_num > 0 ){
+//				QueryNodesList local_doc;
+//				TrieNodeIndex *created_index_node;
+//				for( unsigned int i=0; i<doc->locked_words_num; i++ ){
+//					created_index_node = doc->locked_words[i];
+//					pthread_rwlock_rdlock( &created_index_node->lock_node );
+//								for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+//									for( QueryArrayList::iterator qit=(*it)->qids->begin(), qend=(*it)->qids->end(); qit!=qend; qit++ ){
+//										SparseArraySet( doc->query_ids, qit->qid, qit->pos );
+//									}
+//								}
+//					pthread_rwlock_unlock( &created_index_node->lock_node );
+//				}
+//			}
+
+			if( doc->locked_words_num > 0 ){
+				QueryNodesList local_doc;
+				TrieNodeIndex *created_index_node;
+				for( unsigned int i=0; i<doc->locked_words_num; i++ ){
+					created_index_node = doc->locked_words[i];
+					pthread_rwlock_rdlock( &created_index_node->lock_node );
+					for( QueryNodesList::iterator it=created_index_node->query_nodes->begin(), end=created_index_node->query_nodes->end(); it!=end; it++ ){
+						local_doc.push_back( *it );
+					}
+					pthread_rwlock_unlock( &created_index_node->lock_node );
+				}
+				SparseArrayFill( doc->query_ids, &local_doc );
+			}
 
 			unsigned int total_results;
 			unsigned int *final_ids = SparseArrayCompress(doc->query_ids, &total_results);
@@ -2324,16 +2358,14 @@ void* TrieSearchWord( int tid, void* args ){
 					continue;
 				}
 
-				if( (query_nodes = created_index_node->query_nodes) == 0 ){
-
-					// WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
-					//fprintf(stderr, "searching first time for word[ %.*s ]\n", wsz, w);
-
-					created_index_node->query_nodes = new QueryNodesList();
-					created_index_node->query_nodes->reserve( 128 );
-				}
-
 				if( current_document_batch > created_index_node->updated_till_batch ){
+
+					if( (query_nodes = created_index_node->query_nodes) == 0 ){
+						// WE DID NOT FOUND THE WORD INSIDE THE INDEX SO WE MUST MAKE THE CALCULATIONS AND INSERT IT
+						created_index_node->query_nodes = new QueryNodesList();
+						created_index_node->query_nodes->reserve( 128 );
+					}
+
 					// TODO - update index
 					// WE MUST CHECK EVERY INCOME LIST - ONLY THE VALID ONES AS PER WSZ -
 					// AND IF NECESSARY MAKE THE CALCULATIONS FOR INCOME QUERIES SINCE THE LAST TIME
@@ -2634,14 +2666,23 @@ void* TrieSearchWord( int tid, void* args ){
 
 			}
 
+			// add the locked nodes inside the document in order to get the results at the end in FinishingJob
 			if( locked_nodes_num > 0 ){
-				UpdatingDoc *ud = (UpdatingDoc*)malloc(sizeof(UpdatingDoc));
-				ud->doc = doc;
-				ud->local_doc = local_doc;
-				ud->locked_words_num = locked_nodes_num;
-				ud->locked_words = locked_nodes;
-				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(UpdatingDocumentJob), ud );
-			}else{
+				while( !__sync_bool_compare_and_swap( &doc->locked_lock, 0, 1 ) );
+				for( i=0; i<locked_nodes_num; i++ ){
+					doc->locked_words[doc->locked_words_num + i] = locked_nodes[i];
+				}
+				doc->locked_words_num += locked_nodes_num;
+				__sync_bool_compare_and_swap( &doc->locked_lock, 1, 0 );
+			}
+
+//				UpdatingDoc *ud = (UpdatingDoc*)malloc(sizeof(UpdatingDoc));
+//				ud->doc = doc;
+//				ud->local_doc = local_doc;
+//				ud->locked_words_num = locked_nodes_num;
+//				ud->locked_words = locked_nodes;
+//				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(UpdatingDocumentJob), ud );
+//			}else{
 				free( locked_nodes );
 				pthread_mutex_lock(&doc->mutex_query_ids);
 				SparseArrayFill( doc->query_ids, local_doc);
@@ -2656,7 +2697,7 @@ void* TrieSearchWord( int tid, void* args ){
 					lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[tsd->doc_id]->doc_id );
 				}
 				pthread_mutex_unlock( &doc->mutex_finished_jobs );
-			}
+//			}
 
 			// get the results for the nodes that got updated by other threads
 			// if they were locked previously it means that a thread in this MatchDocuments() batch
