@@ -36,10 +36,10 @@
 
 //////////////////////////////////////////
 
-#define NUM_THREADS 24
+#define NUM_THREADS 48
 #define TOTAL_WORKERS NUM_THREADS+1
 
-#define WORDS_PROCESSED_BY_THREAD 20
+#define WORDS_PROCESSED_BY_THREAD 100
 #define SPARSE_ARRAY_NODE_DATA 70000
 
 #define VALID_CHARS 26
@@ -164,6 +164,7 @@ struct Document{
 	pthread_mutex_t mutex_finished_jobs;
 	SparseArray* query_ids;
 	pthread_mutex_t mutex_query_ids;
+	int unique_words;
 };
 
 struct DocumentHandlerNode{
@@ -418,9 +419,9 @@ ErrorCode DestroyIndex(){
 	delete docResults;
 
 
-	free( documents[0] );
-	for( unsigned int i=1,sz=documents.size(); i<sz; i++ )
-		DocumentDestructor( documents[i] );
+//	free( documents[0] );
+//	for( unsigned int i=1,sz=documents.size(); i<sz; i++ )
+//		DocumentDestructor( documents[i] );
 
 	// destroy the thread pool
 
@@ -589,6 +590,7 @@ ErrorCode MatchDocument(DocID doc_id, const char* doc_str){
 		lastMethodCalled = 3;
 		current_document_batch++;
 		numDocuments = doc_id;
+		lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentTrieDestructorJob), document_batch_trie );
 		memset(documentStatistics, 0, sizeof(documentStatistics));
 		// create the trie for this batch of documents
 		document_batch_trie = TrieNodeDocument_Constructor();
@@ -686,29 +688,28 @@ void HandleDocumentsBatch(){
 			}
 
 			// synchronize to get the results for all documents
-			synchronize_complete( threadpool );
+//			synchronize_complete( threadpool );
 
 			//fprintf( stderr, "searching finished\n" );
 
 
-			for( unsigned int i = 0; i<batchSize; i++ ){
-				unsigned int total_results;
-				unsigned int *final_ids = SparseArrayCompress(documents[i+numDocuments]->query_ids, &total_results);
+//			for( int i = 0; i<batchSize; i++ ){
+//				unsigned int total_results;
+//				unsigned int *final_ids = SparseArrayCompress(documents[i+numDocuments]->query_ids, &total_results);
+//
+//				DocResultsNode docr;
+//				docr.docid=i+numDocuments;
+//				docr.sz=total_results;
+//				docr.qids=final_ids;
 
-				DocResultsNode docr;
-				docr.docid=i+numDocuments;
-				docr.sz=total_results;
-				docr.qids=final_ids;
-
-				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentDeallocationJob), documents[i+numDocuments] );
+//				lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[i+numDocuments]->doc_id );
 
 				//pthread_mutex_lock( &mutex_doc_results );
-				docResults->push_back(docr);
+//				docResults->push_back(docr);
 				//pthread_mutex_unlock( &mutex_doc_results );
-			}
+//			}
 
 			//TrieDocumentClear( document_batch_trie );
-			lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentTrieDestructorJob), document_batch_trie );
 }
 
 
@@ -737,7 +738,7 @@ ErrorCode GetNextAvailRes(DocID* p_doc_id, unsigned int* p_num_res, QueryID** p_
 	*p_doc_id=0; *p_num_res=0; *p_query_ids=0;
 	*p_doc_id=dr.docid; *p_num_res=dr.sz; *p_query_ids=dr.qids;
 
-	lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentDeallocationJob), documents[dr.docid] );
+	//lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(DocumentDeallocationJob), documents[dr.docid] );
 
 	return EC_SUCCESS;
 }
@@ -1325,6 +1326,7 @@ void TrieDocumentClear(TrieNodeDocument* node ){
 	node->doc_ids->clear();
 }
 void TrieDocument_Destructor(TrieNodeDocument* node ){
+	if( node == 0 ) return;
 	for( char i=0; i<VALID_CHARS; i++ ){
 		if( node->children[i] != 0 ){
 			TrieDocument_Destructor( node->children[i] );
@@ -1374,6 +1376,7 @@ inline Document* DocumentConstructor(){
 	pthread_mutex_init( &doc->mutex_finished_jobs, NULL );
 	pthread_mutex_init( &doc->mutex_query_ids, NULL );
 	doc->query_ids = SparseArray_Constructor();
+	doc->unique_words = 0;
 	return doc;
 }
 void DocumentDestructor( Document *doc ){
@@ -1513,7 +1516,7 @@ unsigned int* SparseArrayCompress(SparseArray* array, unsigned int * total){
 			*total = total_found;
 			return final_ids;
 		}
-void SparseArrayFill( SparseArray* sa, QueryNodesList *query_nodes ){
+void SparseArrayFill( SparseArray* sa, QueryNodesList *query_nodes, unsigned int doc_id ){
 	SparseArrayNode* prev=sa->head, *cnode;
     unsigned int index, pos; // qid, pos
 
@@ -1595,7 +1598,7 @@ void SparseArrayFill( SparseArray* sa, QueryNodesList *query_nodes ){
 			cnode->data[ index - cnode->low ][pos] = 1;
 
 		}
-	}
+	}// end for each word
 
 			////fprintf( stderr, "qid[%u] pos[%d] sa_index[%u] sa_low[%u] sa_high[%u]\n", index, pos, index - sa->low, sa->low, sa->high );
 }
@@ -1666,11 +1669,16 @@ void* FinishingJob( int tid, void* args ){
 
 			//Document* doc = documents[doch->doc_id];
 
+	unsigned int doc_id = *((unsigned int *)args);
+
+
+//	fprintf( stderr, "Finishing[%u]\n", doc_id );
+
 			unsigned int total_results;
-			unsigned int *final_ids = SparseArrayCompress(doc->query_ids, &total_results);
+			unsigned int *final_ids = SparseArrayCompress(documents[doc_id]->query_ids, &total_results);
 
 			DocResultsNode docr;
-			docr.docid=doch->doc_id;
+			docr.docid=doc_id;
 			docr.sz=total_results;
 			docr.qids=final_ids;
 
@@ -1680,7 +1688,7 @@ void* FinishingJob( int tid, void* args ){
 			pthread_cond_signal( &cond_doc_results );
 
 
-			DocumentDeallocate(doc);
+			//DocumentDeallocate(documents[doc_id]);
 
 			return 0;
 		}
@@ -1836,7 +1844,8 @@ void* TrieSearchWord( int tid, void* args ){
 			}
 
 
-//			QueryNodesList docs_results[48];
+			int words[48];
+			memset( words, 0, sizeof(int)*48 );
 
 			for( i=job->start_offset, j=job->start_offset+job->num_of_words; i<j; i++ ){
 
@@ -2099,7 +2108,6 @@ void* TrieSearchWord( int tid, void* args ){
 					for( k=created_index_node->income_index[wsz][0], ksz=income_indexes[wsz][0]; k<ksz; k++ ){
 						//valid = 1;
 						IncomeQuery *iq = &db_income.queries[wsz][0].at(k);
-						if( iq->wsz != wsz ) continue; // next word
 						for (x = 0; x < wsz; x++) {
 							if ((iq->word[x] ^ w[x])) {
 								break;
@@ -2108,6 +2116,7 @@ void* TrieSearchWord( int tid, void* args ){
 						if ( x == wsz ) {
 							////fprintf( stderr, "inserted![%.*s] doc_word[%.*s]\n", iq.wsz, iq.word, wsz, w );
 							created_index_node->query_nodes->push_back(iq->query_node);
+							break;
 						}
 					}
 					created_index_node->income_index[wsz][0] = income_indexes[wsz][0];
@@ -2139,11 +2148,15 @@ void* TrieSearchWord( int tid, void* args ){
 
 				// FILL DOCUMENT with QUERY IDS matching this word
 				for( std::vector<unsigned int>::iterator it=documentWords[i]->doc_ids->begin(), end=documentWords[i]->doc_ids->end(); it != end; it++ ){
+					//fprintf( stderr, "[%u]\n", *it );
+
 //					pthread_mutex_lock(&documents[*it]->mutex_query_ids);
 //					SparseArrayFill( documents[*it]->query_ids, created_index_node->query_nodes);
 //					pthread_mutex_unlock(&documents[*it]->mutex_query_ids);
-					for( QueryNodesList::iterator qit=created_index_node->query_nodes->begin(), qend=created_index_node->query_nodes->end(); qit != qend; qit++ )
+					for( QueryNodesList::iterator qit=created_index_node->query_nodes->begin(), qend=created_index_node->query_nodes->end(); qit != qend; qit++ ){
 					     docs_results[tid][*it - numDocuments].push_back( *qit );
+					}
+					words[*it - numDocuments]++;
 				}
 				// reset the TRIE NODE
 				documentWords[i]->doc_ids->clear();
@@ -2155,11 +2168,23 @@ void* TrieSearchWord( int tid, void* args ){
 
 			}
 
+			int uniq;
 			for( int i=0; i<48; i++ ){
+				if( i+numDocuments >= documents.size() )
+					continue;
 				pthread_mutex_lock(&documents[i+numDocuments]->mutex_query_ids);
-				SparseArrayFill( documents[i+numDocuments]->query_ids, &docs_results[tid][i]);
-				docs_results[tid][i].clear();
+//				fprintf( stderr, "i[%d] numDocuments[%u]\n", i, numDocuments );
+//				fprintf( stderr, "[%p]\n", documents[i+numDocuments] );
+				SparseArrayFill( documents[i+numDocuments]->query_ids, &docs_results[tid][i] , i+numDocuments );
+				//fprintf( stderr, "doc[%d] unique[%d] matched[%d]\n", i+numDocuments, documents[i+numDocuments]->unique_words, words[i] );
+				if( words[i]>0 ){
+					documents[i+numDocuments]->unique_words -= words[i];
+					if( documents[i+numDocuments]->unique_words == 0 ){
+						lp_threadpool_addjob(threadpool,reinterpret_cast<void* (*)(int, void*)>(FinishingJob), &documents[i+numDocuments]->doc_id );
+					}
+				}
 				pthread_mutex_unlock(&documents[i+numDocuments]->mutex_query_ids);
+				docs_results[tid][i].clear();
 			}
 
 			free( job );
@@ -2193,6 +2218,7 @@ void* DocumentHandler( int tid, void* args ){
 					continue;
 				}
 
+				++document->unique_words;
 
 				//fprintf( stderr, "new word incoming\n" );
 
@@ -2226,6 +2252,8 @@ void* DocumentHandler( int tid, void* args ){
 				// move on to the next word
 
 			}// end of document words
+
+			//fprintf( stderr, "doc[%d] unique[%d]\n", document->doc_id, document->unique_words );
 
 			free( doch );
 
